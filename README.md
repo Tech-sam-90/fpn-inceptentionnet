@@ -130,6 +130,8 @@ Labels are derived from the directory structure / class names provided in the Ka
 │   └── visualization.py    # Grad-CAM and attention heatmaps
 ├── experiments/
 │   └── configs/            # YAML/JSON configs for experiments
+├── Literatures/            # Papers and references
+├── Writeups/               # Project writeups / notes
 ├── README.md               # Project overview and instructions
 └── requirements.txt        # Python dependencies
 ```
