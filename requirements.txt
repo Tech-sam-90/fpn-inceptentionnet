@@ -1,9 +1,8 @@
-# Python dependencies will be listed here once the implementation is in place.
-# Example packages (versions to be pinned after testing):
-# torch
-# torchvision
-# numpy
-# pillow
-# scikit-learn
-# matplotlib
-# pyyaml
+torch
+torchvision
+numpy
+pandas
+scikit-learn
+Pillow
+PyYAML
+tqdm

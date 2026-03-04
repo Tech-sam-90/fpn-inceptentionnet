@@ -1,0 +1,31 @@
+seed: 42
+
+data:
+  data_root: data
+  mb_class_name: Meduloblastoma
+  mb_target_count: 106
+  non_mb_target_count: 630
+  deduplicate: true
+  image_size: 224
+  gaussian_sigma: 2.0
+  augmentation_factor: 4
+
+model:
+  stem_channels: 64
+  branch_channels: 64
+  attention_heads: 4
+  dropout: 0.3
+
+training:
+  num_folds: 5
+  batch_size: 8
+  learning_rate: 0.005
+  max_epochs: 40
+  early_stopping_patience: 10
+  lr_decay_factor: 0.5
+  lr_decay_patience: 3
+  num_workers: 4
+  use_cuda: true
+
+output:
+  run_dir: experiments/runs/inceptentionnet_baseline
