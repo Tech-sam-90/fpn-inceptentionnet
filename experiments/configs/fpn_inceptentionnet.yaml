@@ -11,9 +11,11 @@ data:
   augmentation_factor: 4
 
 model:
-  name: inceptentionnet
+  name: fpn_inceptentionnet
   stem_channels: 64
   branch_channels: 64
+  fpn_channels: 256
+  attn_spatial: 7
   attention_heads: 4
   dropout: 0.3
 
@@ -29,4 +31,4 @@ training:
   use_cuda: true
 
 output:
-  run_dir: experiments/runs/inceptentionnet_baseline
+  run_dir: experiments/runs/fpn_inceptentionnet

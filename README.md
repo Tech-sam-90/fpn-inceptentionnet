@@ -188,10 +188,10 @@ python src/eval.py --run_id <run_id>
 
 This repository is in an **early stage**:
 
-- [ ] Baseline InceptentionNet implementation
-- [ ] FPN-InceptentionNet implementation
-- [ ] Training and evaluation scripts
-- [ ] Grad-CAM / attention visualization tools
+- [x] Baseline InceptentionNet implementation
+- [x] FPN-InceptentionNet implementation
+- [x] Training and evaluation scripts
+- [x] Grad-CAM / attention visualization tools
 - [ ] Reproduction of baseline metrics on Kaggle data
 - [ ] Comparative experiments (baseline vs. FPN)
 
