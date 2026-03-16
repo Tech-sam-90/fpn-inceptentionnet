@@ -12,7 +12,7 @@ import yaml
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from datasets import FoldEvalDataset, FoldTrainDataset, build_binary_samples
@@ -22,7 +22,7 @@ from transforms import BaselineTransformConfig, QuadAugmentDatasetTransform, bui
 
 @dataclass
 class EarlyStopState:
-    best_loss: float
+    best_f1: float
     best_epoch: int
     wait: int
     best_state_dict: dict | None
@@ -42,7 +42,7 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def build_dataloaders(train_samples, val_samples, config: dict):
+def build_dataloaders(train_samples, val_samples, config: dict, pos_w: float):
     transform_cfg = BaselineTransformConfig(
         image_size=config["data"]["image_size"],
         gaussian_sigma=config["data"]["gaussian_sigma"],
@@ -61,10 +61,16 @@ def build_dataloaders(train_samples, val_samples, config: dict):
     )
     val_dataset = FoldEvalDataset(val_samples, transform=eval_transform)
 
+    sample_weights = [
+        pos_w if train_samples[i % len(train_samples)].label == 1 else 1.0
+        for i in range(len(train_dataset))
+    ]
+    sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_dataset), replacement=True)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=config["training"]["batch_size"],
-        shuffle=True,
+        sampler=sampler,
         num_workers=config["training"]["num_workers"],
         pin_memory=True,
     )
@@ -121,15 +127,20 @@ def train_one_fold(fold_index: int, train_samples, val_samples, config: dict, de
     optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["learning_rate"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        mode="min",
+        mode="max",
         factor=config["training"]["lr_decay_factor"],
         patience=config["training"]["lr_decay_patience"],
     )
-    criterion = nn.BCEWithLogitsLoss()
+    num_positive = sum(1 for s in train_samples if s.label == 1)
+    num_negative = len(train_samples) - num_positive
 
-    train_loader, val_loader = build_dataloaders(train_samples, val_samples, config)
+    pos_w = num_negative / max(num_positive, 1)
+    pos_weight = torch.tensor([pos_w], dtype=torch.float32, device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    early_stop = EarlyStopState(best_loss=float("inf"), best_epoch=-1, wait=0, best_state_dict=None)
+    train_loader, val_loader = build_dataloaders(train_samples, val_samples, config, pos_w)
+
+    early_stop = EarlyStopState(best_f1=-1.0, best_epoch=-1, wait=0, best_state_dict=None)
     history = []
 
     for epoch in range(config["training"]["max_epochs"]):
@@ -151,7 +162,7 @@ def train_one_fold(fold_index: int, train_samples, val_samples, config: dict, de
 
         val_metrics = evaluate(model, val_loader, device, criterion)
         train_loss = float(np.mean(epoch_losses) if epoch_losses else 0.0)
-        scheduler.step(val_metrics["loss"])
+        scheduler.step(val_metrics["f1"])
 
         epoch_record = {
             "epoch": epoch + 1,
@@ -161,8 +172,8 @@ def train_one_fold(fold_index: int, train_samples, val_samples, config: dict, de
         }
         history.append(epoch_record)
 
-        if val_metrics["loss"] < early_stop.best_loss:
-            early_stop.best_loss = val_metrics["loss"]
+        if val_metrics["f1"] > early_stop.best_f1:
+            early_stop.best_f1 = val_metrics["f1"]
             early_stop.best_epoch = epoch + 1
             early_stop.wait = 0
             early_stop.best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -179,7 +190,7 @@ def train_one_fold(fold_index: int, train_samples, val_samples, config: dict, de
     fold_result = {
         "fold": fold_index + 1,
         "best_epoch": early_stop.best_epoch,
-        "best_val_loss": early_stop.best_loss,
+        "best_val_f1": early_stop.best_f1,
         "metrics": final_metrics,
         "history": history,
     }
