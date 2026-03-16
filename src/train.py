@@ -125,7 +125,12 @@ def train_one_fold(fold_index: int, train_samples, val_samples, config: dict, de
         factor=config["training"]["lr_decay_factor"],
         patience=config["training"]["lr_decay_patience"],
     )
-    criterion = nn.BCEWithLogitsLoss()
+    train_labels = np.array([s.label for s in train_samples])
+    num_pos = int(train_labels.sum())
+    num_neg = len(train_labels) - num_pos
+    pos_weight_value = num_neg / max(num_pos, 1)
+    pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32, device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     train_loader, val_loader = build_dataloaders(train_samples, val_samples, config)
 
