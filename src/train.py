@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from datasets import FoldEvalDataset, FoldTrainDataset, build_binary_samples
+from models.fpn_inceptentionnet import FPNInceptentionNet
 from models.inceptentionnet import InceptentionNet
 from transforms import BaselineTransformConfig, QuadAugmentDatasetTransform, build_eval_transform
 
@@ -110,13 +111,26 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, criteri
     return metrics
 
 
-def train_one_fold(fold_index: int, train_samples, val_samples, config: dict, device: torch.device):
-    model = InceptentionNet(
+def build_model(config: dict) -> nn.Module:
+    model_name = config["model"].get("name", "inceptentionnet")
+    if model_name == "fpn_inceptentionnet":
+        return FPNInceptentionNet(
+            stem_channels=config["model"]["stem_channels"],
+            branch_channels=config["model"]["branch_channels"],
+            fpn_channels=config["model"]["fpn_channels"],
+            num_heads=config["model"]["attention_heads"],
+            dropout=config["model"]["dropout"],
+        )
+    return InceptentionNet(
         stem_channels=config["model"]["stem_channels"],
         branch_channels=config["model"]["branch_channels"],
         num_heads=config["model"]["attention_heads"],
         dropout=config["model"]["dropout"],
-    ).to(device)
+    )
+
+
+def train_one_fold(fold_index: int, train_samples, val_samples, config: dict, device: torch.device):
+    model = build_model(config).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["learning_rate"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -199,7 +213,7 @@ def summarize_results(fold_results: list[dict]) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train InceptentionNet baseline with 5-fold cross-validation")
+    parser = argparse.ArgumentParser(description="Train InceptentionNet or FPN-InceptentionNet with 5-fold cross-validation")
     parser.add_argument("--config", required=True, help="Path to YAML config")
     args = parser.parse_args()
 
