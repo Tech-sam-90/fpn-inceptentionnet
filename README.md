@@ -1,8 +1,6 @@
-# FPN-InceptentionNet: Multi-Scale Medulloblastoma Classification in Brain MRI
+# FPN-Mamba: Multi-Scale Medulloblastoma Classification in Brain MRI
 
-This repository contains an extended implementation of **InceptentionNet**, a hybrid CNN + self-attention model for medulloblastoma (MB) classification in MRI, with an additional **Feature Pyramid Network (FPN)** module to better handle lesion size and appearance variability.
-
-The work is inspired by and uses the architecture in:
+This repository contains the implementation of **FPN-Mamba**, an architecture that integrates a **Feature Pyramid Network (FPN)** with **Bidirectional Mamba State Space Models** for binary classification of medulloblastoma (MB) in brain MRI. The work is motivated by and compared against InceptentionNet:
 
 > Fang C, Li C, Liu H, et al. Precise identification of medulloblastoma in MRI images using a convolutional neural network integrated with a self-attention mechanism. *Digital Health*. 2025;11:20552076251351536.
 
@@ -10,71 +8,48 @@ The work is inspired by and uses the architecture in:
 
 ## 1. Project Overview
 
-Medulloblastoma is the most common malignant brain tumor in children and often arises in the posterior fossa. In Fang et al.’s InceptentionNet, an Inception-based backbone is combined with a multihead self-attention module to perform **binary image classification** (MB vs. non-MB) using MRI.
+Medulloblastoma is the most common malignant brain tumor in children, accounting for approximately 20% of all pediatric brain tumors. Early and accurate identification is critical because a missed diagnosis delays treatment during the period of greatest therapeutic opportunity.
 
-While InceptentionNet achieves strong performance, its self-attention operates on a **single, downsampled feature map**, inheriting the usual CNN limitation that deep features are semantically strong but spatially coarse. This can reduce sensitivity to:
+InceptentionNet achieves strong binary classification performance but applies self-attention to a **single, downsampled feature map**. This means the model reasons at one coarse spatial scale, which limits its sensitivity to small lesions, weakly contrasted tumors, and atypically located masses — precisely the cases identified in Fang et al.'s own error analysis as the dominant source of false negatives.
 
-- Very small medulloblastoma lesions,
-- Weakly contrasted or atypical tumors,
-- Tumors that overlap anatomically and visually with other posterior fossa entities (e.g., cystic ependymoma, midline glioma).
+FPN-Mamba addresses this through two simultaneous design changes:
 
-Feature Pyramid Networks (FPN) were proposed to address exactly this kind of multi-scale issue by constructing a **top–down feature hierarchy with lateral connections**, yielding feature maps that are both **semantically rich and spatially detailed** at multiple scales (Lin et al., 2017).
+1. **Multi-scale feature hierarchy via FPN** — every pyramid level from fine (56×56) to coarse (7×7) reaches the classifier, so no presentation is structurally excluded from detection.
+2. **Linear-complexity global context via Mamba** — Bidirectional Mamba State Space Models replace self-attention at each pyramid level, operating in O(L) time rather than O(L²). This makes global context modeling feasible at fine spatial resolutions where self-attention would be computationally prohibitive.
 
-### Goal of this Repository
-
-This repository:
-
-- Reproduces the **baseline InceptentionNet** architecture as described by Fang et al. (2025).
-- Introduces an **FPN module** on top of the Inception backbone to build a **multi-scale feature pyramid** before self-attention.
-- Compares **baseline vs. FPN-InceptentionNet** on the same publicly available dataset used for training in the original paper (Kaggle “Brain Tumor for 14 classes”).
-- Evaluates whether FPN improves robustness to lesion size and appearance variation in MB classification.
+The improved metrics are a downstream consequence of this architectural design. The primary objective is clinical: reducing the false negative rate for the hardest MB cases.
 
 ---
 
-## 2. Methods (High-Level)
+## 2. Architecture
 
-### 2.1 Baseline: InceptentionNet
+FPN-Mamba consists of four functional stages:
 
-The baseline follows Fang et al. (2025):
+### 2.1 EfficientNet-B2 Backbone
+- ImageNet pretrained, accessed via `timm` in features-only mode
+- Outputs four feature levels: C2 (56×56, 24ch), C3 (28×28, 48ch), C4 (14×14, 120ch), C5 (7×7, 352ch)
+- First three child modules frozen; deeper modules fine-tuned
+- Backbone channels probed dynamically at initialisation to avoid hardcoded dimension bugs
 
-1. **Preprocessing**
-   - Gaussian filtering (σ = 2) for noise reduction.
-   - Histogram equalization for contrast enhancement.
-   - Data augmentation: random rotation (0°–45°), horizontal flipping, zooming (0.8–1.2).
+### 2.2 FPN Neck with LocalityMixing
+- Lateral 1×1 convolutions project every level to 256 channels
+- Top-down pathway adds upsampled deeper features to shallower lateral projections
+- The standard 3×3 FPN smoothing convolution is **replaced at every level** by a **LocalityMixing block**:
+  - Depthwise 3×3 conv for local neighbourhood refinement
+  - Bidirectional Mamba SSM for full-image global context (O(L) complexity)
+  - Learned sigmoid gate blends local and global per spatial position
+  - Serialises BCHW → B(HW)C for Mamba, then deserialises back to BCHW
 
-2. **Architecture**
-   - **Stem**: 3×3 convolution (stride 1, 64 filters).
-   - **Modified Inception block**: parallel 1×1, 3×3, and 5×5 convolutions with batch normalization and ReLU, stride-2 convolution instead of max-pooling for downsampling.
-   - **Self-attention module**: multihead self-attention (e.g., 4 heads, 64-dim queries/keys) applied on the extracted feature map.
-   - **Classification head**: dense layers with dropout, sigmoid output for MB vs. non-MB.
+### 2.3 Cross-Scale Bidirectional Mamba
+- All four pyramid levels (P2–P5) are flattened and concatenated into one sequence
+- A single Bidirectional Mamba scan propagates context across levels simultaneously
+- Output is split by known token counts and deserialized to per-level spatial maps
+- Enables fine-scale evidence (P2) to directly inform coarse-scale semantics (P5) and vice versa
 
-3. **Training**
-   - Optimizer: Adam (initial learning rate 0.005, reduce-on-plateau).
-   - Batch size: 8.
-   - Early stopping: patience 10.
-   - 5-fold cross-validation.
-
-### 2.2 Proposed: FPN-InceptentionNet
-
-The proposed model inserts an **FPN** between the Inception backbone and the self-attention:
-
-1. **Bottom-up pathway**
-   - Inception blocks produce feature maps at multiple depths (e.g., C3, C4, C5).
-
-2. **Top–down FPN with lateral connections**
-   - C5 is upsampled and merged with C4 via a 1×1 lateral convolution → P4.
-   - P4 is upsampled and merged with C3 → P3.
-   - Each merge is followed by a 3×3 convolution to reduce aliasing.
-
-3. **Scale-aware self-attention**
-   - Self-attention is applied at each pyramid level (P3, P4, P5) separately.
-   - Attention outputs are pooled and concatenated before classification.
-
-4. **Classification**
-   - Global average pooling per scale.
-   - Concatenation → dense layer + batch norm + ReLU → dropout → sigmoid.
-
-The task remains **binary classification**, so only **image-level labels** are required.
+### 2.4 Classification Head
+- **GeM Pooling** (learned p=3): pools each pyramid level independently, emphasising high-activation positions over background tissue
+- **SE Channel Attention** (1024→64→1024): recalibrates which of the 1024 concatenated channels are most informative for MB classification
+- **FC Head**: Linear(1024→512) BN GELU Dropout(0.3) → Linear(512→128) GELU Dropout(0.15) → Linear(128→1) → Sigmoid
 
 ---
 
