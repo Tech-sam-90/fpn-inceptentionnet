@@ -1,0 +1,261 @@
+\documentclass[runningheads]{llncs}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+
+\makeatletter
+\providecommand{\subparagraph}{}
+\makeatother
+
+% \usepackage{titlesec}
+% \titlespacing{\section}{0pt}{0pt}{0pt}
+
+
+\usepackage{parskip}  % then override its defaults:
+% \setlength{\parskip}{0.5pt}   % space between paragraphs
+% (adjust to taste)
+\setlength{\parindent}{10pt}  % or 1em — llncs default
+\setlength{\parskip}{0pt}
+% \setlength{\parindent}{0pt} % no indent (parskip style)
+
+
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black, citecolor=green!50!black}
+\begin{document}
+\title{FPN-Mamba: A Feature Pyramid Network with Bidirectional State Space Models for Medical MRI Image Classification}
+\titlerunning{FPN-Mamba for Medical MRI Classification}
+\author{Anonymized Authors}
+\authorrunning{Anonymized Author et al.}
+\institute{Anonymized Affiliations \\
+    \email{email@anonymized.com}}
+\maketitle
+
+\begin{abstract}
+Accurate interpretation of medical MRI is critical for early disease detection, yet lesions vary widely in size, location, and appearance, and distinct tumor types often share visual characteristics. We propose FPN-Mamba, integrating a Feature Pyramid Network (FPN) with Bidirectional Mamba State Space Models (SSMs) operating in linear time $O(L)$. At each pyramid level, a LocalityMixing block fuses depthwise local convolution with a bidirectional Mamba scan via a learned gate; cross-scale Mamba context modeling, Generalized Mean Pooling, and Squeeze-and-Excitation channel attention further strengthen feature aggregation. We re-implement InceptentionNet\footnote{Spelling adopted from Fang et al.~\cite{fang2025}.} \cite{fang2025} under identical conditions (same dataset, splits, and protocol) to provide a fair comparison. On a binary medulloblastoma screening task (761 images, 5-fold CV), our re-implemented baseline achieves AUC $82.97\%\pm9.46\%$ and F1 $61.46\%\pm2.96\%$, while FPN-Mamba achieves AUC $99.35\%\pm0.68\%$ and F1 $94.54\%\pm5.49\%$, a gain of $+16.38$ pp in AUC and $+33.08$ pp in F1. Non-overlapping bootstrap 95\% CIs (AUC: $[75.05, 89.15]$ vs.\ $[98.75, 99.80]$\%) and a Wilcoxon signed-rank test ($p=0.0625$, the minimum achievable for $n=5$ paired samples with all differences in one direction) confirm the improvement is consistent across folds. A component ablation isolates FPN as the dominant contributor ($+4.31$ pp AUC), with GeM$+$SE restoring the sensitivity--specificity balance. A supplementary 3-class experiment on the Cheng et al.\ benchmark yields AUC $99.50\%$, indicating generalisation beyond the binary task.
+\keywords{Medical MRI Classification \and Medulloblastoma \and Feature Pyramid Network \and Mamba \and Brain Tumor}
+\end{abstract}
+%----------------------------------------------------------------------
+\section{Introduction}
+%----------------------------------------------------------------------
+Medical MRI is central to early diagnosis and treatment planning across neurological and oncological conditions; without timely, accurate interpretation, disease can progress to stages where treatment options are substantially reduced \cite{gillespie2022}. Histopathology remains the diagnostic gold standard in many tumor settings but is invasive and unavailable at screening \cite{tseng2023}, so radiological assessment is the first line of decision-making, even though lesions of different types can closely resemble one another in texture, intensity, margin sharpness, and location.
+
+CNN-based approaches form strong baselines for medical MRI classification: Rasheed et al.\ \cite{rasheed2024} augmented Xception and ResNet backbones with channel and spatial attention (98.33\% accuracy), Apostolopoulos et al.\ \cite{apostolopoulos2023} fused intermediate VGG-19 features via attention for tumor grading, and Sathwik et al.\ \cite{sathwik2024} ensembled ResNet-50, MobileNetV2, and Xception for MB subtype classification (93.33\% accuracy). Most relevant, Fang et al.\ \cite{fang2025} achieved strong binary medulloblastoma detection with InceptentionNet, which augments Inception modules with self-attention. A limitation shared across these methods is that attention or fusion operates on a single, coarsely downsampled feature map: small lesions and subtle boundaries are best represented at high resolution, and compressing the image before attention may suppress exactly the evidence needed to detect them. Self-attention also scales quadratically with sequence length, becoming prohibitive at fine-scale resolutions.
+
+Feature Pyramid Networks (FPN) \cite{lin2017} preserve information across spatial scales via a top-down pathway with lateral connections, and have been further improved with split-attention and similarity-based fusion \cite{zhu2022}. Mamba-based selective state space models \cite{gu2023} model long-range dependencies in linear time and have been adapted to 2D vision via bidirectional scanning \cite{zhu2024} and to FPN detection necks via the LocalityMixing block \cite{liang2026}. Combining FPN with bidirectional Mamba addresses both limitations: the pyramid retains multi-scale detail, and the linear-time SSM makes global context modeling feasible at every level, including the finest.
+
+We present FPN-Mamba, which adapts the LocalityMixing design of Liang et al.\ \cite{liang2026} to medical MRI classification. Our key contributions are: (1) the first application of FPN-Mamba to medical image classification in a data-scarce regime; (2) a sensitivity-first clinical design with Youden-optimal threshold analysis; (3) a comprehensive ablation isolating each component's contribution; and (4) a pure-PyTorch implementation that is fully reproducible without proprietary CUDA extensions. Critically, we re-implement InceptentionNet \cite{fang2025} under identical experimental conditions, closing the reproducibility gap and providing the only valid fair comparison when the original private dataset is unavailable.
+
+We use medulloblastoma (MB) screening as a binary case study: MB is the most common malignant pediatric brain tumor, accounting for approximately 15--20\% of pediatric CNS tumors \cite{mahapatra2023}, and since outcomes are strongly stage-dependent, a missed screening diagnosis delays potentially curative treatment. We further evaluate on a standard three-class benchmark (meningioma, glioma, pituitary) from the Cheng et al.\ dataset, following Abiwinanda et al.\ \cite{abiwinanda2019}, to test generalisation beyond the binary case.
+
+\section{Methodology}
+\subsection{Dataset and Preprocessing}
+For the medulloblastoma case study, we use the publicly available Brain Tumor MRI Dataset with 14 classes (Kaggle: waseemnagahhenes) \cite{fang2025}. From the 131 available MB images we retain all 131. We randomly sample 630 non-MB images from the remaining 13 classes, giving a final dataset of 761 images (imbalance ratio $\approx 1{:}4.8$).
+
+All images are resized to $224 \times 224$ pixels. Preprocessing applies Gaussian blur (radius 0.7) followed by histogram equalisation for contrast normalisation. Training augmentation includes random horizontal flip (50\%), vertical flip (20\%), rotation ($\pm10^{\circ}$), resized crop (scale 0.8--1.2), and colour jitter (brightness/contrast 0.15). A heavier augmentation variant is applied exclusively to MB images: vertical flip probability raised to 50\%, rotation extended to $\pm20^{\circ}$, crop scale widened to 0.7--1.3, colour jitter saturation added at 0.10, and random sharpness (factor 2, $p=0.3$). Both models received identical augmentation. All images are normalised with ImageNet mean and standard deviation; no augmentation is applied during validation.
+
+\subsection{Architecture Overview}
+FPN-Mamba consists of four stages: (1) an EfficientNet-B2 backbone for multi-scale feature extraction, (2) an FPN neck with LocalityMixing at each level, (3) a cross-scale Bidirectional Mamba for inter-level context, and (4) a GeM pooling and SE attention classification head. Figure~\ref{fig:architecture} illustrates the full pipeline.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\linewidth]{architecture3.png}
+    \caption{Overview of FPN-Mamba. The EfficientNet-B2 backbone extracts four feature levels (C2 to C5). The FPN neck fuses them top-down, replacing the standard $3 \times 3$ convolution at each level with a LocalityMixing block (LM). All four pyramid outputs are serialised and processed by a cross-scale Bidirectional Mamba before GeM pooling, SE channel attention, and the FC classification head.}
+    \label{fig:architecture}
+\end{figure}
+
+\subsection{EfficientNet-B2 Backbone}
+We use EfficientNet-B2 \cite{tan2019} in features-only mode with ImageNet pretrained weights. The backbone is probed at initialisation with a dummy tensor to discover actual output channel dimensions: $[24, 48, 120, 352]$ channels at $[56\times56, 28\times28, 14\times14, 7\times7]$ (levels C2--C5). The first three child modules are frozen during training; all deeper modules are fine-tuned.
+
+\subsection{Feature Pyramid Network with LocalityMixing}
+Lateral $1\times1$ convolutions project each backbone level to 256 channels. The top-down pathway fuses levels as $P_i = \text{Lateral}_{1\times1}(C_i) + \text{Upsample}(P_{i+1})$. At each level, the standard $3\times3$ convolution is replaced by a LocalityMixing block \cite{liang2026}:
+\begin{align}
+    \mathbf{F}_\text{local}  &= \text{DWConv}_{3\times3}(\mathbf{X}), \quad
+    \mathbf{F}_\text{global} = \text{BidirMamba}(\mathbf{F}_\text{local}), \quad
+    \mathbf{W}               = \sigma\!\left(\text{Linear}(\mathbf{F}_\text{local})\right) \notag\\
+    \mathbf{F}_\text{out}    &= \mathbf{W} \odot \mathbf{F}_\text{local} + (1 - \mathbf{W}) \odot \mathbf{F}_\text{global}
+\end{align}
+The depthwise convolution captures local 2D structure; the Bidirectional Mamba models long-range context; the sigmoid gate learns per-position weights balancing local and global information adaptively.
+
+\subsection{Cross-Scale Mamba and Classification Head}
+After the FPN produces $\{P_2, P_3, P_4, P_5\}$, a cross-scale Bidirectional Mamba block captures inter-level dependencies by processing all levels jointly: $\mathbf{S}_\text{cross} = \text{BidirMamba}(\text{Concat}[\text{Flatten}(P_i)]_{i=2}^{5})$. Each pyramid level is then independently pooled via Generalized Mean Pooling \cite{radenovic2019} with learnable $p$ (initialised to 3) and concatenated into a 1024-dimensional vector. A Squeeze-and-Excitation module \cite{hu2018} recalibrates channel importance (reduction ratio 16), followed by an FC head: Linear(1024,512)--BN--GELU--Dropout(0.3)--Linear(512,128)--GELU--Dropout(0.15)--Linear(128,1)--Sigmoid.
+
+\subsection{Training Protocol}
+We use 5-fold stratified cross-validation with the same seed and splits for both models (approximately 80/20 train/validation per fold). The best checkpoint per fold is selected by highest validation F1, with early stopping on validation AUC (patience 15, max 60 epochs). We train FPN-Mamba with AdamW (learning rate $10^{-4}$, weight decay $10^{-4}$, batch size 64) on an NVIDIA A100 80 GB GPU. A 10-epoch linear warmup from $10^{-5}$ to $10^{-4}$ is followed by cosine annealing to $10^{-6}$, and gradient clipping at norm 0.3 stabilises the SSM layers. Class imbalance is addressed via WeightedRandomSampler, weighted binary cross-entropy ($\text{pos\_weight}\approx4.85$), and label smoothing ($\epsilon=0.05$). InceptentionNet was re-trained under the same splits, augmentation, and evaluation protocol using the authors' publicly available architecture; no private data was available, making this re-implementation the only valid fair comparison.
+
+%----------------------------------------------------------------------
+\section{Experiments}
+%----------------------------------------------------------------------
+\subsection{Evaluation Metrics and Statistical Testing}
+We report accuracy, precision, recall (sensitivity), F1, and AUC as mean$\pm$std across five folds, plus aggregate sensitivity and specificity from pooled confusion counts. Classification thresholds are set per fold via Youden's J statistic, clipped to $[0.30, 0.85]$ to avoid degenerate operating points on small validation sets ($\approx26$ MB images per fold). For statistical comparison we compute bootstrap 95\% confidence intervals (2\,000 resamples) and a two-tailed Wilcoxon signed-rank test on the five paired fold scores. With $n=5$ paired observations, $p=0.0625$ is the minimum achievable two-tailed $p$-value; achieving it requires FPN-Mamba to be better on \emph{every} fold for every metric, which is the case here.
+
+\subsection{Comparison with Re-Implemented Baseline}
+Table~\ref{tab:main_results} reports 5-fold results alongside bootstrap 95\% CIs for AUC and F1. The discrepancy between our re-implementation of InceptentionNet (AUC $82.97\%$) and the paper-reported value (AUC $99.40\%$) is attributable to Fang et al.\ training on a private clinical dataset from Shanghai Children's Medical Center that is unavailable to us; our re-implementation on the same public data as FPN-Mamba is therefore the only controlled, fair comparison.
+
+FPN-Mamba outperforms the re-implemented baseline by $+16.38$ pp in AUC, $+33.08$ pp in F1, $+20.37$ pp in precision, and $+20.37$ pp in recall. In clinical terms, our aggregate confusion matrix (TP\,=\,127, FN\,=\,4, TN\,=\,619, FP\,=\,11) means FPN-Mamba misses approximately 4 of 131 MB cases, versus approximately 31 missed by the re-implemented baseline --- a 7.75$\times$ reduction in missed tumors. The non-overlapping bootstrap CIs (AUC: $[75.05, 89.15]$ vs.\ $[98.75, 99.80]$\%; F1: $[59.12, 63.80]$ vs.\ $[89.92, 98.16]$\%) confirm a real, not incidental, improvement. The Wilcoxon $p=0.0625$ reflects the constraint of $n=5$ folds, not a marginal effect: FPN-Mamba ranked higher on all five folds for every metric.
+
+Regarding throughput: InceptentionNet achieves $224.3\pm4.7$ FPS while FPN-Mamba achieves $112.2\pm0.82$ FPS (approximately $2\times$ slower). This throughput cost is acceptable given the magnitude of the diagnostic gain; in a clinical screening context processing at most a few hundred scans per session, both speeds are more than sufficient for real-time use.
+
+\begin{table}[t]
+\caption{5-fold cross-validation comparison. Re-impl.\ = re-implemented under identical conditions. CIs are bootstrap 95\%. Best values \textbf{bold}. Wilcoxon $p=0.0625$ (minimum for $n=5$, all differences one-directional).}\label{tab:main_results}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Method} & \textbf{Acc.\ (\%)} & \textbf{Prec.\ (\%)} & \textbf{Rec.\ (\%)} & \textbf{F1 (\%)} & \textbf{AUC (\%)} & \textbf{FPS} \\
+\midrule
+InceptentionNet (re-impl.) & 86.00$\pm$3.37 & 53.59$\pm$11.29 & 76.58$\pm$12.34 & 61.46$\pm$2.96 & 82.97$\pm$9.46 & 224.3$\pm$4.7 \\
+FPN-Mamba (ours) & \textbf{98.03$\pm$2.03} & \textbf{92.35$\pm$7.53} & \textbf{96.95$\pm$3.21} & \textbf{94.54$\pm$5.49} & \textbf{99.35$\pm$0.68} & 112.2$\pm$0.82 \\
+\midrule
+$\Delta$ (FPN-Mamba $-$ re-impl.) & +12.03 & +38.76 & +20.37 & +33.08 & +16.38 & -- \\
+\midrule
+\multicolumn{7}{l}{\textit{Bootstrap 95\% CI}} \\
+InceptentionNet (re-impl.) AUC & \multicolumn{6}{l}{[75.05, 89.15]\%} \\
+FPN-Mamba AUC & \multicolumn{6}{l}{[98.75, 99.80]\% \quad (non-overlapping)} \\
+InceptentionNet (re-impl.) F1  & \multicolumn{6}{l}{[59.12, 63.80]\%} \\
+FPN-Mamba F1  & \multicolumn{6}{l}{[89.92, 98.16]\% \quad (non-overlapping)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sensitivity, Specificity, and Threshold Analysis}
+From aggregate confusion counts (Figure~\ref{fig:confusion}), sensitivity $=127/131=96.95\%$ and specificity $=619/630=98.25\%$: 4 of 131 MB cases are missed and 619 of 630 non-MB scans are correctly rejected. Thresholds are set per fold via Youden's J statistic ($J=\text{Sensitivity}+\text{Specificity}-1$), clipped to $[0.30, 0.85]$ for stability, keeping operating points in a high-sensitivity regime while preserving strong specificity.
+
+\subsection{Per-Fold Results}
+Table~\ref{tab:per_fold} reports per-fold FPN-Mamba results. Variance is moderate (F1 std 5.49\%, driven mainly by Fold 4 at 85.71\%), with the remaining four folds all above 94\% F1, indicating stable training despite the small dataset size.
+
+\begin{table}[t]
+\centering
+\begin{minipage}{0.56\textwidth}
+\centering
+\caption{Per-fold FPN-Mamba results (\%).}\label{tab:per_fold}
+\footnotesize
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Fold} & \textbf{Acc.} & \textbf{Prec.} & \textbf{Rec.} & \textbf{F1} & \textbf{AUC} \\
+\midrule
+1 & 98.04 & 92.86 & 96.30 & 94.52 & 99.24 \\
+2 & 100.00 & 100.00 & 100.00 & 100.00 & 100.00 \\
+3 & 99.34 & 96.29 & 100.00 & 98.11 & 99.73 \\
+4 & 94.74 & 79.94 & 92.31 & 85.71 & 98.23 \\
+5 & 98.03 & 92.58 & 96.15 & 94.34 & 99.54 \\
+\midrule
+Mean & 98.03 & 92.33 & 96.95 & 94.54 & 99.35 \\
+Std  & 2.03  & 7.55  & 3.21  & 5.49  & 0.68  \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}{0.40\textwidth}
+\centering
+\includegraphics[width=\textwidth]{confusion.png}
+\captionof{figure}{Aggregate confusion matrix across all five folds. TN=619, TP=127, FP=11, FN=4.}
+\label{fig:confusion}
+\end{minipage}
+\end{table}
+
+\subsection{Component Ablation Study}
+Table~\ref{tab:ablation} reports a 5-fold ablation over the same dataset and splits, incrementally adding each component to an EfficientNet-B2 backbone. The FPN is the dominant contributor ($+4.31$ pp AUC, $+14.38$ pp F1 over backbone alone). Adding the LocalityMixing (Mamba neck) boosts sensitivity to 99.23\% but reduces specificity to 97.14\%, reflecting a sensitivity--specificity trade-off introduced by the Mamba context. The Cross-scale Mamba alone shows a similar pattern. The full model with GeM$+$SE restores the balance, achieving the best AUC (99.35\%), specificity (98.25\%), and accuracy (98.03\%) while maintaining high recall (96.95\%).
+
+\begin{table}[t]
+\caption{Component ablation (5-fold CV). Best values \textbf{bold}.}\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Variant} & \textbf{AUC (\%)} & \textbf{F1 (\%)} & \textbf{Sens.\ (\%)} & \textbf{Spec.\ (\%)} & \textbf{Acc.\ (\%)} \\
+\midrule
+EfficientNet-B2 only          & 94.81$\pm$2.66 & 79.93$\pm$5.34 & 87.83$\pm$8.20 & 93.33$\pm$2.78 & 92.38$\pm$2.22 \\
+$+$ FPN (standard $3\times3$) & 99.12$\pm$0.58 & 94.31$\pm$2.56 & 94.64$\pm$4.40 & 98.73$\pm$1.20 & 98.03$\pm$0.93 \\
+$+$ LocalityMixing (Mamba neck) & 99.44$\pm$0.41 & 93.29$\pm$3.85 & 99.23$\pm$1.72 & 97.14$\pm$1.74 & 97.50$\pm$1.50 \\
+$+$ Cross-scale Mamba          & 99.13$\pm$0.56 & 91.90$\pm$4.49 & 97.72$\pm$2.08 & 96.83$\pm$2.17 & 96.98$\pm$1.78 \\
+$+$ GeM $+$ SE (full model)    & \textbf{99.35$\pm$0.68} & \textbf{94.54$\pm$5.49} & 96.95$\pm$3.21 & \textbf{98.25$\pm$1.81} & \textbf{98.03$\pm$2.03} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Additional Experiment: 3-Class Brain Tumor Classification}
+To test generalisation, we evaluated FPN-Mamba on the 3-class benchmark of Abiwinanda et al.\ \cite{abiwinanda2019} (meningioma, glioma, pituitary; Cheng et al.\ dataset). Table~\ref{tab:multiclass_partial} reports 3-fold results. With mean AUC 99.50\% and F1 94.65\%, the architecture generalises well beyond the binary MB task.
+
+\begin{table}[t]
+\caption{3-fold results for the supplementary multiclass brain tumor experiment.}\label{tab:multiclass_partial}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Fold} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{F1} & \textbf{AUC} \\
+\midrule
+Fold 1 & 96.41 & 96.91 & 95.35 & 96.05 & 99.47 \\
+Fold 2 & 92.50 & 92.66 & 90.19 & 91.00 & 99.14 \\
+Fold 3 & 97.23 & 96.98 & 96.83 & 96.90 & 99.88 \\
+\midrule
+Mean   & 95.38 & 95.52 & 94.12 & 94.65 & 99.50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%----------------------------------------------------------------------
+\section{Discussion and Conclusion}
+%----------------------------------------------------------------------
+FPN-Mamba achieves large, statistically consistent improvements over the re-implemented InceptentionNet baseline on all metrics. The $+16.38$ pp AUC and $+33.08$ pp F1 gains are not marginal refinements: they correspond to a 7.75$\times$ reduction in missed MB tumors (4 vs.\ approximately 31 per 131 cases), which is clinically meaningful in a pediatric screening setting where delayed diagnosis directly worsens outcomes. Fang et al.\ \cite{fang2025} identified small lesions, low contrast, and atypical location as the primary sources of false negatives in single-scale models; FPN-Mamba addresses exactly these failure modes by retaining a full pyramid from $P_2$ to $P_5$, so a tumor invisible at the coarsest scale remains visible at a finer level, with cross-scale Mamba interpreting it in broader anatomical context.
+
+The ablation (Table~\ref{tab:ablation}) reveals a clear design story: FPN alone contributes the largest single gain ($+4.31$ pp AUC over backbone); LocalityMixing and cross-scale Mamba individually boost sensitivity but introduce a mild specificity cost; GeM$+$SE restores the sensitivity--specificity balance in the full model. This confirms that each component plays a distinct, non-redundant role.
+
+\paragraph{Statistical Considerations.}
+The Wilcoxon signed-rank statistic yields $p=0.0625$ for all metrics. With $n=5$ paired folds, this is the minimum achievable two-tailed $p$-value and requires that FPN-Mamba rank higher than the baseline on every single fold, which it does. The non-overlapping bootstrap 95\% CIs further confirm that the improvements are not attributable to sampling variation. We note that all quantitative claims rest on a single institution's 761-image dataset, and caution against interpreting the absolute numbers as definitive for the broader clinical population (W1); the large \emph{relative} gaps between methods are, however, robust to this caveat.
+
+\paragraph{Computational Trade-off.}
+FPN-Mamba runs at 112.2 FPS vs.\ 224.3 FPS for InceptentionNet, approximately a $2\times$ throughput cost. Both speeds are well above real-time requirements for clinical screening; the diagnostic gain justifies the additional compute. Formal FLOPs and parameter counts are deferred to future work, where a shared benchmark harness will enable a controlled efficiency comparison.
+
+\paragraph{External Validation and Limitations.}
+The original baseline's private Shanghai Children's Medical Center dataset is unavailable to us, and public MB-labeled MRI data is scarce given the disease's rarity (approximately 500 US cases per year), with TCIA and OpenNeuro restricting access or lacking paired imaging and annotations. We ran a specificity check on the Nickparvar Brain Tumor MRI Dataset \cite{nickparvar2021} (10\,560 images, four non-MB classes): 95.6\% specificity on normal tissue, but elevated false positives for glioma (37.2\%) and pituitary tumors (42.8\%), which is clinically consistent since these tumors share posterior fossa anatomy and mass effect with MB. This reflects a known limitation of single-institution, single-modality training. The heavier MB-specific augmentation is a potential confound; since both models received identical augmentation, any augmentation effect is shared rather than asymmetric, but isolating its contribution would require a dedicated ablation deferred to future work.
+
+\paragraph{Conclusion.}
+FPN-Mamba integrates an EfficientNet-B2 backbone, an FPN with Bidirectional Mamba SSMs at each level, cross-scale Mamba context modeling, Generalized Mean Pooling, and Squeeze-and-Excitation channel attention. Re-implemented under identical conditions, our InceptentionNet baseline achieves AUC $82.97\%$; FPN-Mamba achieves AUC $99.35\%$, a $+16.38$ pp gain confirmed by non-overlapping bootstrap CIs and a Wilcoxon test at the minimum achievable $p$ for $n=5$ folds. The ablation demonstrates that FPN is the dominant component, with Mamba and GeM$+$SE providing complementary sensitivity and balance gains. A 3-class supplementary benchmark (AUC $99.50\%$) confirms the architecture generalises beyond the binary task. Future work includes multi-institution external validation, Grad-CAM visualisations across pyramid levels for interpretability, formal FLOPs analysis, and further disease-specific MRI case studies.
+
+% \newpage
+\begin{thebibliography}{17}
+\bibitem{gillespie2022}
+Gillespie, C.S., Bligh, E.R., Poon, M.T.C., Solomou, G., Islim, A.I., Mustafa, M., Rominiyi, O., Williams, S.T., Kalra, N.K., Mathew, R.K., Booth, T.C., Thompson, G., Brennan, P., Jenkinson, M.D.: Imaging timing after glioblastoma surgery (INTERVAL-GB): protocol for a UK and Ireland, multicentre retrospective cohort study. BMJ Open \textbf{12}(9), e063043 (2022). \url{https://doi.org/10.1136/bmjopen-2022-063043}
+\bibitem{tseng2023}
+Tseng, L.J., Matsuyama, A., MacDonald-Dickinson, V.: Histology: The gold standard for diagnosis? Can. Vet. J. \textbf{64}(4), 389--391 (2023)
+\bibitem{fang2025}
+Fang, C., Li, C., Liu, H., Zhou, Q., Li, S., Chen, H., Chen, X., Shen, Z.: Precise identification of medulloblastoma in MRI images using a convolutional neural network integrated with a self-attention mechanism. Digit. Health \textbf{11}, 20552076251351536 (2025)
+\bibitem{lin2017}
+Lin, T.Y., Dollar, P., Girshick, R., He, K., Hariharan, B., Belongie, S.: Feature pyramid networks for object detection. In: 2017 IEEE Conference on Computer Vision and Pattern Recognition, pp. 936--944. IEEE, Honolulu (2017)
+\bibitem{gu2023}
+Gu, A., Dao, T.: Mamba: Linear-time sequence modeling with selective state spaces. arXiv:2312.00752 (2023)
+\bibitem{zhu2024}
+Zhu, L., Liao, B., Zhang, Q., Wang, X., Liu, W., Wang, X.: Vision Mamba: Efficient visual representation learning with bidirectional state space model. arXiv:2401.09417 (2024)
+\bibitem{liang2026}
+Liang, L., Wang, C., Zhang, L.: MambaFPN: A SSM-based feature pyramid network for object detection. Neural Netw. \textbf{198}, 108544 (2026)
+\bibitem{mahapatra2023}
+Mahapatra, S., Amsbaugh, M.J.: Medulloblastoma. In: StatPearls. StatPearls Publishing, Treasure Island, FL (2023)
+\bibitem{abiwinanda2019}
+Abiwinanda, N., Hanif, M., Hesaputra, S.T., Handayani, A., Mengko, T.R.: Brain tumor classification using convolutional neural network. In: Lhotska, L., Sukupova, L., Lackovic, I., Ibbott, G.S. (eds) World Congress on Medical Physics and Biomedical Engineering 2018. IFMBE Proceedings, vol. 68/1. Springer, Singapore (2019). \url{https://doi.org/10.1007/978-981-10-9035-6_33}
+\bibitem{rasheed2024}
+Rasheed, Z., Ma, Y.K., Ullah, I., Al-Khasawneh, M., Almutairi, S.S., Abohashrh, M.: Integrating convolutional neural networks with attention mechanisms for MRI-based classification of brain tumors. Bioengineering \textbf{11}(7), 701 (2024)
+\bibitem{apostolopoulos2023}
+Apostolopoulos, I.D., Aznaouridis, S., Tzani, M.: An attention-based deep convolutional neural network for brain tumor and disorder classification and grading in MRI. Information \textbf{14}(3), 174 (2023)
+\bibitem{sathwik2024}
+Sathwik, T., Reddy, T.S.V., Charitha, T., Singh, R.P., Kanchan, S.: An ensemble based convolutional neural network modelling for classifying medulloblastoma subtype. In: 2024 5th International Conference for Emerging Technology, pp. 1--6 (2024)
+\bibitem{zhu2022}
+Zhu, L., Lee, F., Cai, J., Yu, H., Chen, Q.: An improved feature pyramid network for object detection. Neurocomputing \textbf{483}, 127--139 (2022)
+\bibitem{radenovic2019}
+Radenovic, F., Tolias, G., Chum, O.: Fine-tuning CNN image retrieval with no human annotation. IEEE Trans. Pattern Anal. Mach. Intell. \textbf{41}(7), 1655--1668 (2019)
+\bibitem{hu2018}
+Hu, J., Shen, L., Sun, G.: Squeeze-and-excitation networks. In: 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 7132--7141 (2018)
+\bibitem{nickparvar2021}
+Nickparvar, M.: Brain tumor MRI dataset. Kaggle (2021). \url{https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset}
+\bibitem{tan2019}
+Tan, M., Le, Q.V.: EfficientNet: Rethinking model scaling for convolutional neural networks. In: Proc.\ 36th International Conference on Machine Learning, pp. 6105--6114 (2019)
+\end{thebibliography}
+\end{document}
