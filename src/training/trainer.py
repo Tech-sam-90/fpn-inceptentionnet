@@ -218,9 +218,10 @@ def _wandb_init(config: dict, fold_idx: int, run_dir: Path):
     if not wcfg.get("enabled", False) or not WANDB_AVAILABLE:
         return None
     model_name = config["model"]["name"]
-    run = wandb.init(
+    entity = wcfg.get("entity") or None  # treat empty string same as None
+
+    init_kwargs = dict(
         project=wcfg.get("project", "medulloblastoma-classification"),
-        entity=wcfg.get("entity", None),
         name=f"{model_name}_fold{fold_idx + 1}",
         group=model_name,
         config={
@@ -230,8 +231,12 @@ def _wandb_init(config: dict, fold_idx: int, run_dir: Path):
             "fold": fold_idx + 1,
         },
         dir=str(run_dir),
-        reinit=True,
+        reinit="finish_previous",  # wandb >= 0.18; avoids deprecation warning
     )
+    if entity:  # only pass entity when explicitly set — avoids "no default entity" error
+        init_kwargs["entity"] = entity
+
+    run = wandb.init(**init_kwargs)
     return run
 
 
