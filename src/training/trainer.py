@@ -394,20 +394,40 @@ def run_crossval(config: dict) -> dict:
 
     fold_results, all_labels, all_probs = [], [], []
     best_auc, best_state = 0.0, None
+    num_folds = config["training"].get("num_folds", 5)
 
     for fold_idx, (tr_idx, va_idx) in enumerate(splitter.split(np.zeros(len(samples)), labels_arr)):
-        tr = [samples[i] for i in tr_idx]
-        va = [samples[i] for i in va_idx]
+        fold_result_path = run_dir / f"fold_{fold_idx + 1}_result.json"
 
         print(f"\n{'='*70}")
-        print(f"  FOLD {fold_idx + 1} / {config['training'].get('num_folds', 5)}"
-              f"   ({len(tr)} train / {len(va)} val)")
+        print(f"  FOLD {fold_idx + 1} / {num_folds}"
+              f"   ({len([samples[i] for i in tr_idx])} train / {len([samples[i] for i in va_idx])} val)")
         print(f"{'='*70}")
 
+        if fold_result_path.exists():
+            print(f"  [RESUME] Fold {fold_idx + 1} already done — loading saved result.")
+            with fold_result_path.open(encoding="utf-8") as f:
+                result = json.load(f)
+            m = result["metrics"]
+            print(f"\n  Fold {fold_idx + 1} result -> "
+                  f"AUC={m['auc']:.4f}  F1={m['f1']:.4f}  "
+                  f"Sens={m.get('sensitivity', 0):.4f}  Spec={m.get('specificity', 0):.4f}  "
+                  f"Acc={m['accuracy']:.4f}  "
+                  f"Time={m['training_time_sec']/60:.1f}min")
+            fold_results.append(result)
+            if result["metrics"]["auc"] > best_auc:
+                best_auc = result["metrics"]["auc"]
+            continue
+
+        tr = [samples[i] for i in tr_idx]
+        va = [samples[i] for i in va_idx]
         model, result, f_labels, f_probs = train_fold(fold_idx, tr, va, config, device)
 
         torch.save({k: v.cpu() for k, v in model.state_dict().items()},
                    run_dir / f"fold_{fold_idx + 1}.pt")
+        with fold_result_path.open("w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, default=str)
+
         fold_results.append(result)
         all_labels.append(f_labels)
         all_probs.append(f_probs)
