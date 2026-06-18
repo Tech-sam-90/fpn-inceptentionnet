@@ -65,9 +65,20 @@ def main() -> None:
         print(f"  Variant: {DISPLAY_NAMES.get(variant, variant)}")
         print(f"{'='*60}")
 
+        variant_run_dir = Path(base_config["output"]["run_dir"]) / variant
+        cv_results_path = variant_run_dir / "cv_results.json"
+
+        if cv_results_path.exists():
+            print(f"[RESUME] Found existing results at {cv_results_path} — skipping training.")
+            with cv_results_path.open(encoding="utf-8") as f:
+                payload = json.load(f)
+            summary = summarize_folds(payload["fold_results"])
+            ablation_results[variant] = summary
+            continue
+
         config = {**base_config}
         config["model"] = {**base_config.get("model", {}), "name": variant, **ABLATION_VARIANTS[variant]}
-        config["output"] = {"run_dir": f"{base_config['output']['run_dir']}/{variant}"}
+        config["output"] = {"run_dir": str(variant_run_dir)}
 
         payload = run_crossval(config)
         summary = summarize_folds(payload["fold_results"])
