@@ -1,0 +1,209 @@
+digraph FPNMamba {
+    graph [
+        rankdir=TB
+        splines=ortho
+        nodesep=0.5
+        ranksep=0.7
+        fontname="Helvetica"
+        bgcolor="white"
+        label="FPN-Mamba Architecture "
+        labelloc=t
+        fontsize=24
+        fontcolor="#1F4E79"
+    ]
+
+    node [
+        fontname="Helvetica"
+        fontsize=14
+        style="filled,rounded"
+        penwidth=1.5
+        margin="0.12,0.08"
+    ]
+
+    edge [
+        fontname="Helvetica"
+        fontsize=12
+        penwidth=1.5
+        arrowsize=0.8
+    ]
+
+    // ── INPUT ──────────────────────────────────────────────────────────────
+    input [
+        label="Input MRI\n224 x 224 x 3"
+        shape=box
+        fillcolor="#F2F2F2"
+        color="#333333"
+    ]
+
+    // ── EFFICIENTNET-B2 BACKBONE ───────────────────────────────────────────
+    subgraph cluster_backbone {
+        label="EfficientNet-B2 Backbone\n(ImageNet pretrained, first 3 children frozen)"
+        fontsize=13
+        fontcolor="#1F4E79"
+        style="dashed,rounded"
+        color="#1F4E79"
+        bgcolor="#EBF3FB"
+
+        c2 [label="C2\n56x56, 24ch" shape=box fillcolor="#D6E4F0" color="#1F4E79"]
+        c3 [label="C3\n28x28, 48ch" shape=box fillcolor="#D6E4F0" color="#1F4E79"]
+        c4 [label="C4\n14x14, 120ch" shape=box fillcolor="#D6E4F0" color="#1F4E79"]
+        c5 [label="C5\n7x7, 352ch"  shape=box fillcolor="#D6E4F0" color="#1F4E79"]
+    }
+
+    // ── FPN LATERAL PROJECTIONS ────────────────────────────────────────────
+    subgraph cluster_lateral {
+        label="Lateral 1x1 Conv (each level -> 256ch)"
+        fontsize=12
+        fontcolor="#155724"
+        style="dashed,rounded"
+        color="#155724"
+        bgcolor="#F0FAF0"
+
+        lat2 [label="Lateral\n1x1" shape=box fillcolor="#C3E6CB" color="#155724"]
+        lat3 [label="Lateral\n1x1" shape=box fillcolor="#C3E6CB" color="#155724"]
+        lat4 [label="Lateral\n1x1" shape=box fillcolor="#C3E6CB" color="#155724"]
+        lat5 [label="Lateral\n1x1" shape=box fillcolor="#C3E6CB" color="#155724"]
+    }
+
+    // ── FPN TOP-DOWN + LOCALITY MIXING ─────────────────────────────────────
+    subgraph cluster_fpn {
+        label="FPN Neck with LocalityMixing (LM) at each level"
+        fontsize=13
+        fontcolor="#0C5460"
+        style="dashed,rounded"
+        color="#0C5460"
+        bgcolor="#D1ECF1"
+
+        subgraph cluster_lm_legend {
+            label="LocalityMixing block\nDWConv3x3 (local) + BidirMamba (global)\nFused via learned sigmoid gate"
+            fontsize=11
+            fontcolor="#0C5460"
+            style="dotted"
+            color="#0C5460"
+            bgcolor="white"
+            lm_legend [label="" shape=none width=0 height=0]
+        }
+
+        p5 [label="P5: LM\n7x7, 256ch"   shape=box fillcolor="#B8DAFF" color="#004085"]
+        p4 [label="P4: LM\n14x14, 256ch" shape=box fillcolor="#B8DAFF" color="#004085"]
+        p3 [label="P3: LM\n28x28, 256ch" shape=box fillcolor="#B8DAFF" color="#004085"]
+        p2 [label="P2: LM\n56x56, 256ch" shape=box fillcolor="#B8DAFF" color="#004085"]
+
+        upsample_54 [label="Upsample\nx2" shape=diamond fillcolor="#E2E3E5" color="#383D41" fontsize=11]
+        upsample_43 [label="Upsample\nx2" shape=diamond fillcolor="#E2E3E5" color="#383D41" fontsize=11]
+        upsample_32 [label="Upsample\nx2" shape=diamond fillcolor="#E2E3E5" color="#383D41" fontsize=11]
+    }
+
+    // ── CROSS-SCALE MAMBA ──────────────────────────────────────────────────
+    cross_mamba [
+        label="Cross-Scale Bidirectional Mamba\nNaive Concat serialisation of P2+P3+P4+P5\nOutputs cross_out: (B, total_L, C)"
+        shape=box
+        fillcolor="#FFEEBA"
+        color="#856404"
+        fontsize=12
+    ]
+
+    // ── SECTION 2: POST CROSS-SCALE MAMBA (horizontal for slides) ─────────
+    subgraph cluster_post_mamba {
+        label="Post Cross-Scale Processing Head"
+        fontsize=13
+        fontcolor="#856404"
+        style="dashed,rounded"
+        color="#856404"
+        bgcolor="#FFFDF5"
+
+        // ── RESHAPE: split cross_out back into per-level spatial maps ──────
+        reshape [
+            label="Reshape cross_out\nSplit sequence back into\nP2' P3' P4' P5' spatial maps"
+            shape=box
+            fillcolor="#FFF3CD"
+            color="#856404"
+            fontsize=12
+            style="filled,rounded,dashed"
+        ]
+
+        // ── GEM POOLING ────────────────────────────────────────────────────
+        gem [
+            label="GeM Pooling (learned p=3)\nPool each reshaped Px' independently\nConcat -> 1024-dim vector"
+            shape=box
+            fillcolor="#F5C6CB"
+            color="#721C24"
+            fontsize=12
+        ]
+
+        // ── SE CHANNEL ATTENTION ───────────────────────────────────────────
+        se [
+            label="SE Channel Attention\n1024 -> 64 -> 1024\nRecalibrates channel importance"
+            shape=box
+            fillcolor="#F5C6CB"
+            color="#721C24"
+            fontsize=12
+        ]
+
+        // ── FC HEAD ────────────────────────────────────────────────────────
+        fc [
+            label="FC Head\nLinear(1024->512) BN GELU Drop(0.3)\nLinear(512->128) GELU Drop(0.15)\nLinear(128->1)"
+            shape=box
+            fillcolor="#D6D8DB"
+            color="#383D41"
+            fontsize=12
+        ]
+
+        // ── OUTPUT ─────────────────────────────────────────────────────────
+        output [
+            label="Sigmoid\nMB / Non-MB"
+            shape=ellipse
+            fillcolor="#1F4E79"
+            color="#1F4E79"
+            fontcolor="white"
+            fontsize=14
+        ]
+    }
+
+    // ── EDGES: INPUT -> BACKBONE ───────────────────────────────────────────
+    input -> c2 [color="#333333"]
+    c2 -> c3    [color="#1F4E79" label="stride 2"]
+    c3 -> c4    [color="#1F4E79" label="stride 2"]
+    c4 -> c5    [color="#1F4E79" label="stride 2"]
+
+    // ── EDGES: BACKBONE -> LATERAL ─────────────────────────────────────────
+    c2 -> lat2 [color="#155724" style=dashed]
+    c3 -> lat3 [color="#155724" style=dashed]
+    c4 -> lat4 [color="#155724" style=dashed]
+    c5 -> lat5 [color="#155724" style=dashed]
+
+    // ── EDGES: LATERAL -> FPN (top-down) ──────────────────────────────────
+    lat5 -> p5 [color="#004085"]
+    lat4 -> p4 [color="#004085"]
+    lat3 -> p3 [color="#004085"]
+    lat2 -> p2 [color="#004085"]
+
+    // ── EDGES: TOP-DOWN PATHWAY ────────────────────────────────────────────
+    p5 -> upsample_54 [color="#383D41"]
+    upsample_54 -> p4 [color="#383D41" label="+ lateral" fontsize=11]
+    p4 -> upsample_43 [color="#383D41"]
+    upsample_43 -> p3 [color="#383D41" label="+ lateral" fontsize=11]
+    p3 -> upsample_32 [color="#383D41"]
+    upsample_32 -> p2 [color="#383D41" label="+ lateral" fontsize=11]
+
+    // ── EDGES: FPN -> CROSS MAMBA (all four levels concatenated) ──────────
+    p2 -> cross_mamba [color="#856404" label="Flatten+Concat" fontsize=11]
+    p3 -> cross_mamba [color="#856404"]
+    p4 -> cross_mamba [color="#856404"]
+    p5 -> cross_mamba [color="#856404"]
+
+    // ── EDGES: CROSS MAMBA -> RESHAPE -> GEM (sequential, not parallel) ───
+    cross_mamba -> reshape [color="#856404" label="cross_out\n(B, total_L, C)" fontsize=11]
+    reshape -> gem         [color="#721C24" label="P2' P3' P4' P5'\n(B, C, H, W)" fontsize=11]
+
+    // ── EDGES: HEAD ────────────────────────────────────────────────────────
+    gem -> se     [color="#721C24"]
+    se  -> fc     [color="#383D41"]
+    fc  -> output [color="#1F4E79" penwidth=2]
+
+    // ── RANK ALIGNMENT ─────────────────────────────────────────────────────
+    { rank=same; c2; c3; c4; c5 }
+    { rank=same; lat2; lat3; lat4; lat5 }
+    { rank=same; p2; p3; p4; p5 }
+    { rank=same; reshape; gem; se; fc; output }
+}
