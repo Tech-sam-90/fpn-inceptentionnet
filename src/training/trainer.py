@@ -233,6 +233,7 @@ def _wandb_init(config: dict, fold_idx: int, run_dir: Path):
         },
         dir=str(run_dir),
         reinit="finish_previous",
+        settings=wandb.Settings(console="off"),  # tqdm spinners break wandb console upload
     )
     return run
 
