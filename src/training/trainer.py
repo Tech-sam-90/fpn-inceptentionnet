@@ -249,7 +249,8 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
     name = config["model"]["name"]
 
     if name == "inceptentionnet":
-        loss_fn = lambda logits, labels: bce_loss(logits, labels)
+        # pos_weight penalises MB false negatives; keeps BCE (no smoothing) to match paper spirit
+        loss_fn = lambda logits, labels: weighted_bce_smooth(logits, labels, pos_weight, 0.0)
     else:
         pw = pos_weight * 0.6 if fold_idx == 1 else pos_weight
         loss_fn = lambda logits, labels: weighted_bce_smooth(logits, labels, pw, label_smoothing)

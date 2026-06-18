@@ -28,7 +28,7 @@ training:
   lr_decay_patience: 5
   warmup_epochs: 0
   grad_clip: 1.0
-  use_weighted_sampler: false
+  use_weighted_sampler: true
   use_mb_transform: false
   augmentation_factor: 4        # paper: augmented 736 → 2944 images (×4)
   label_smoothing: 0.0
