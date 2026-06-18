@@ -123,7 +123,7 @@ def _build_optimizer_scheduler(model: nn.Module, config: dict, steps_per_epoch: 
     if name == "inceptentionnet":
         optimizer = torch.optim.Adam(params, lr=lr)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=t.get("lr_decay_factor", 0.5), patience=t.get("lr_decay_patience", 5)
+            optimizer, mode="max", factor=t.get("lr_decay_factor", 0.5), patience=t.get("lr_decay_patience", 5)
         )
         return optimizer, scheduler, "plateau"
     else:
@@ -282,7 +282,7 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
         val_metrics, _, _ = _evaluate(model, val_loader, device)
 
         if sched_mode == "plateau":
-            scheduler.step(val_metrics.get("loss", val_metrics.get("auc", 0)))
+            scheduler.step(val_metrics["auc"])
         else:
             scheduler.step()
 
