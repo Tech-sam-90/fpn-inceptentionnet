@@ -1,0 +1,39 @@
+# Shared config for all ablation variants.
+# Model flags are overridden per-variant by run_ablation.py.
+seed: 42
+
+model:
+  # name and use_* flags are set programmatically by run_ablation.py
+  fpn_channels: 256
+  d_state: 16
+  dropout: 0.3
+  freeze_layers: 3
+
+data:
+  data_root: data
+  mb_class_name: Meduloblastoma
+  mb_target_count: 131
+  non_mb_target_count: 630
+  image_size: 224
+  gaussian_sigma: 0.7
+  imagenet_norm: true
+  deduplicate: true
+
+training:
+  num_folds: 5
+  batch_size: 16
+  max_epochs: 60
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  early_stopping_patience: 15
+  warmup_epochs: 10
+  grad_clip: 0.3
+  use_weighted_sampler: true
+  use_mb_transform: true
+  label_smoothing: 0.05
+  pos_weight_scale: 1.0
+  use_cuda: true
+  num_workers: 0
+
+output:
+  run_dir: experiments/runs/ablation

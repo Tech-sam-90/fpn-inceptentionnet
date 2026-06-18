@@ -1,0 +1,40 @@
+seed: 42
+
+model:
+  name: inceptentionnet
+  stem_channels: 64
+  branch_channels: 64
+  attention_heads: 4            # paper: 4 heads × 64 dims = 256 embed_dim
+  dropout: 0.3
+
+data:
+  data_root: data
+  mb_class_name: Meduloblastoma
+  mb_target_count: 106          # paper: 106 after pHash + manual dedup (not 131)
+  non_mb_target_count: 630
+  image_size: 224
+  gaussian_sigma: 2.0           # paper: "Gaussian filter with standard deviation of 2"
+  imagenet_norm: false          # paper does not specify; 0.5/0.5 is a safe default
+  deduplicate: true
+
+training:
+  num_folds: 5
+  batch_size: 8                 # paper: "mini-batch size of 8"
+  max_epochs: 40                # paper: "maximum of 40 epochs"
+  learning_rate: 5.0e-3         # paper: "initial learning rate of 0.005"
+  weight_decay: 0.0
+  early_stopping_patience: 10   # paper: "validation loss did not improve for 10 consecutive epochs"
+  lr_decay_factor: 0.5
+  lr_decay_patience: 5
+  warmup_epochs: 0
+  grad_clip: 1.0
+  use_weighted_sampler: false
+  use_mb_transform: false
+  augmentation_factor: 4        # paper: augmented 736 → 2944 images (×4)
+  label_smoothing: 0.0
+  pos_weight_scale: 1.0
+  use_cuda: true
+  num_workers: 0
+
+output:
+  run_dir: experiments/runs/inceptentionnet
