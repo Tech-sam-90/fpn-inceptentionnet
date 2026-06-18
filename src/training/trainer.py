@@ -220,6 +220,16 @@ def _wandb_init(config: dict, fold_idx: int, run_dir: Path):
     model_name = config["model"]["name"]
     entity = wcfg.get("entity") or None  # treat empty string same as None
 
+    # Auto-resolve entity from the logged-in user when not set in config.
+    # wandb requires an entity but some accounts have no default_entity.
+    # The username is always a valid entity (personal workspace).
+    if not entity:
+        try:
+            api = wandb.Api()
+            entity = api.default_entity or api.viewer["username"]
+        except Exception:
+            entity = None
+
     init_kwargs = dict(
         project=wcfg.get("project", "medulloblastoma-classification"),
         name=f"{model_name}_fold{fold_idx + 1}",
@@ -231,9 +241,9 @@ def _wandb_init(config: dict, fold_idx: int, run_dir: Path):
             "fold": fold_idx + 1,
         },
         dir=str(run_dir),
-        reinit="finish_previous",  # wandb >= 0.18; avoids deprecation warning
+        reinit="finish_previous",
     )
-    if entity:  # only pass entity when explicitly set — avoids "no default entity" error
+    if entity:
         init_kwargs["entity"] = entity
 
     run = wandb.init(**init_kwargs)
