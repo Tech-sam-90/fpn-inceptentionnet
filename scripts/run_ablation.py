@@ -69,9 +69,24 @@ def main() -> None:
         cv_results_path = variant_run_dir / "cv_results.json"
 
         if cv_results_path.exists():
-            print(f"[RESUME] Found existing results at {cv_results_path} — skipping training.")
+            print(f"[RESUME] Results found at {cv_results_path} — replaying saved results.\n")
             with cv_results_path.open(encoding="utf-8") as f:
                 payload = json.load(f)
+
+            num_folds = len(payload["fold_results"])
+            print(f"Dataset  : {payload.get('num_samples', '?')} samples  "
+                  f"({payload.get('num_mb', '?')} MB / {payload.get('num_non_mb', '?')} non-MB)")
+            for i, result in enumerate(payload["fold_results"]):
+                m = result["metrics"]
+                print(f"\n{'='*70}")
+                print(f"  FOLD {i + 1} / {num_folds}   [loaded from Drive]")
+                print(f"{'='*70}")
+                print(f"\n  Fold {i + 1} result -> "
+                      f"AUC={m['auc']:.4f}  F1={m['f1']:.4f}  "
+                      f"Sens={m.get('sensitivity', 0):.4f}  Spec={m.get('specificity', 0):.4f}  "
+                      f"Acc={m['accuracy']:.4f}  "
+                      f"Time={m['training_time_sec'] / 60:.1f}min")
+
             summary = summarize_folds(payload["fold_results"])
             ablation_results[variant] = summary
             continue
