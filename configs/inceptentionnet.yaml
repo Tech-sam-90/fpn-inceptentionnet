@@ -42,4 +42,4 @@ output:
 wandb:
   enabled: true
   project: medulloblastoma-classification
-  entity: null
+  entity: sadeniji-carnegie-mellon-university
