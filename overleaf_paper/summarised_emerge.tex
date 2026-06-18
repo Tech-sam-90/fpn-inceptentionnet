@@ -213,7 +213,23 @@ The ablation (Table~\ref{tab:ablation}) reveals a clear design story: FPN alone 
 The Wilcoxon signed-rank statistic yields $p=0.0625$ for all metrics. With $n=5$ paired folds, this is the minimum achievable two-tailed $p$-value and requires that FPN-Mamba rank higher than the baseline on every single fold, which it does. The non-overlapping bootstrap 95\% CIs further confirm that the improvements are not attributable to sampling variation. We note that all quantitative claims rest on a single institution's 761-image dataset, and caution against interpreting the absolute numbers as definitive for the broader clinical population (W1); the large \emph{relative} gaps between methods are, however, robust to this caveat.
 
 \paragraph{Computational Trade-off.}
-FPN-Mamba runs at 112.2 FPS vs.\ 224.3 FPS for InceptentionNet, approximately a $2\times$ throughput cost. Both speeds are well above real-time requirements for clinical screening; the diagnostic gain justifies the additional compute. Formal FLOPs and parameter counts are deferred to future work, where a shared benchmark harness will enable a controlled efficiency comparison.
+Table~\ref{tab:efficiency} summarises the efficiency profile of both models. FPN-Mamba has 17.8M parameters vs.\ 1.1M for InceptentionNet ($16.5\times$ larger), but the FLOPs ratio is far more favourable: 33.1 vs.\ 19.3 GFLOPs ($1.7\times$). The FLOPs gap is modest because the EfficientNet-B2 backbone---which accounts for the bulk of compute---is shared in spirit, and the Mamba scans operate in linear time. Throughput reflects this: 112.2 FPS vs.\ 224.3 FPS, approximately $2\times$ slower. Both speeds are well above real-time requirements for clinical screening; in a setting processing at most a few hundred scans per session, the $+16.38$ pp AUC gain easily justifies the added parameter and compute cost. During training, \texttt{freeze\_layers=3} keeps the first three EfficientNet-B2 stages fixed, leaving $\approx13.1$M parameters actively trained.
+
+\begin{table}[h]
+\centering
+\caption{Efficiency comparison at $224\times224$ input (CPU profiling via \texttt{thop}).}\label{tab:efficiency}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Model} & \textbf{Params (M)} & \textbf{GFLOPs} & \textbf{MACs} & \textbf{FPS} \\
+\midrule
+InceptentionNet & 1.1 & 19.3 & 9.65G & 224.3$\pm$4.7 \\
+FPN-Mamba       & 17.8 & 33.1 & 16.57G & 112.2$\pm$0.82 \\
+\midrule
+Ratio (FPN / Incept.) & $16.5\times$ & $1.7\times$ & $1.7\times$ & $0.5\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \paragraph{External Validation and Limitations.}
 The original baseline's private Shanghai Children's Medical Center dataset is unavailable to us, and public MB-labeled MRI data is scarce given the disease's rarity (approximately 500 US cases per year), with TCIA and OpenNeuro restricting access or lacking paired imaging and annotations. We ran a specificity check on the Nickparvar Brain Tumor MRI Dataset \cite{nickparvar2021} (10\,560 images, four non-MB classes): 95.6\% specificity on normal tissue, but elevated false positives for glioma (37.2\%) and pituitary tumors (42.8\%), which is clinically consistent since these tumors share posterior fossa anatomy and mass effect with MB. This reflects a known limitation of single-institution, single-modality training. The heavier MB-specific augmentation is a potential confound; since both models received identical augmentation, any augmentation effect is shared rather than asymmetric, but isolating its contribution would require a dedicated ablation deferred to future work.

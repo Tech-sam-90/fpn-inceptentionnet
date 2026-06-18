@@ -4,10 +4,10 @@ A PyTorch implementation of FPN-Mamba applied to binary medulloblastoma (MB) scr
 
 **Key results (5-fold CV, 761 images, A100 80GB):**
 
-| Model | AUC | F1 | Sensitivity | Specificity | FPS |
-|---|---|---|---|---|---|
-| InceptentionNet (re-impl.) | 82.97 ± 9.46% | 61.46 ± 2.96% | 76.58 ± 12.34% | 87.62 ± 5.98% | 224 |
-| **FPN-Mamba (ours)** | **99.35 ± 0.68%** | **94.54 ± 5.49%** | **96.95 ± 3.21%** | **98.25 ± 1.81%** | 112 |
+| Model | AUC | F1 | Sensitivity | Specificity | Params | GFLOPs | FPS |
+|---|---|---|---|---|---|---|---|
+| InceptentionNet (re-impl.) | 82.97 ± 9.46% | 61.46 ± 2.96% | 76.58 ± 12.34% | 87.62 ± 5.98% | 1.1M | 19.3 | 224 |
+| **FPN-Mamba (ours)** | **99.35 ± 0.68%** | **94.54 ± 5.49%** | **96.95 ± 3.21%** | **98.25 ± 1.81%** | 17.8M | 33.1 | 112 |
 
 Bootstrap 95% CIs are non-overlapping (AUC: \[75.1, 89.2\]% vs \[98.8, 99.8\]%). Wilcoxon p = 0.0625 — the minimum achievable for n = 5 paired folds with all differences in one direction.
 
