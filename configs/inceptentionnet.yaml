@@ -21,7 +21,7 @@ training:
   num_folds: 5
   batch_size: 8                 # paper: "mini-batch size of 8"
   max_epochs: 40                # paper: "maximum of 40 epochs"
-  learning_rate: 5.0e-3         # paper: "initial learning rate of 0.005"
+  learning_rate: 1.0e-3         # reduced from paper's 0.005 -- stabilises training on this dataset size
   weight_decay: 0.0
   early_stopping_patience: 10   # paper: "validation loss did not improve for 10 consecutive epochs"
   lr_decay_factor: 0.5
