@@ -38,3 +38,8 @@ training:
 
 output:
   run_dir: experiments/runs/inceptentionnet
+
+wandb:
+  enabled: true
+  project: medulloblastoma-classification
+  entity: null

@@ -25,6 +25,12 @@ from src.models.ablation import build_ablation_model
 from src.training.losses import bce_loss, compute_pos_weight, weighted_bce_smooth
 from src.utils.seed import seed_everything
 
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
 
 @dataclass
 class EarlyStop:
@@ -67,7 +73,6 @@ def _build_model(config: dict) -> nn.Module:
             use_gem=m.get("use_gem", True),
             use_se=m.get("use_se", True),
         )
-    # Ablation variants
     return build_ablation_model(name, dropout=m.get("dropout", 0.3))
 
 
@@ -144,12 +149,14 @@ def _get_amp_dtype():
     return torch.float16
 
 
-def _train_epoch(model, loader, optimizer, scaler, loss_fn, device, grad_clip):
+def _train_epoch(model, loader, optimizer, scaler, loss_fn, device, grad_clip, epoch, max_epochs):
     model.train()
     total_loss = correct = total = nan_batches = 0
     amp_dtype = _get_amp_dtype()
 
-    for imgs, labels in loader:
+    bar = tqdm(loader, desc=f"  Epoch {epoch:>3}/{max_epochs} [train]", leave=False,
+               unit="batch", dynamic_ncols=True)
+    for imgs, labels in bar:
         imgs, labels = imgs.to(device), labels.to(device)
         optimizer.zero_grad(set_to_none=True)
 
@@ -175,6 +182,7 @@ def _train_epoch(model, loader, optimizer, scaler, loss_fn, device, grad_clip):
         total_loss += loss.item() * imgs.size(0)
         correct += ((torch.sigmoid(logits) > 0.5).long() == labels.long()).sum().item()
         total += imgs.size(0)
+        bar.set_postfix(loss=f"{loss.item():.4f}")
 
     return (total_loss / total if total > 0 else float("nan"),
             correct / total if total > 0 else 0.0,
@@ -204,6 +212,29 @@ def _evaluate(model, loader, device, threshold=None):
     return metrics, la, pb
 
 
+def _wandb_init(config: dict, fold_idx: int, run_dir: Path):
+    """Start a wandb run for one fold. Returns the run or None if wandb is disabled."""
+    wcfg = config.get("wandb", {})
+    if not wcfg.get("enabled", False) or not WANDB_AVAILABLE:
+        return None
+    model_name = config["model"]["name"]
+    run = wandb.init(
+        project=wcfg.get("project", "medulloblastoma-classification"),
+        entity=wcfg.get("entity", None),
+        name=f"{model_name}_fold{fold_idx + 1}",
+        group=model_name,
+        config={
+            "model": config["model"],
+            "training": config["training"],
+            "data": config["data"],
+            "fold": fold_idx + 1,
+        },
+        dir=str(run_dir),
+        reinit=True,
+    )
+    return run
+
+
 def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: torch.device):
     t = config["training"]
     seed_everything(config.get("seed", 42) + fold_idx)
@@ -218,18 +249,15 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
     if name == "inceptentionnet":
         loss_fn = lambda logits, labels: bce_loss(logits, labels)
     else:
-        if fold_idx == 1:
-            pw = pos_weight * 0.6
-        else:
-            pw = pos_weight
+        pw = pos_weight * 0.6 if fold_idx == 1 else pos_weight
         loss_fn = lambda logits, labels: weighted_bce_smooth(logits, labels, pw, label_smoothing)
 
     optimizer, scheduler, sched_mode = _build_optimizer_scheduler(model, config, len(train_loader))
-    # bfloat16 has wide dynamic range — GradScaler not needed, but harmless to keep
     use_scaler = device.type == "cuda" and not torch.cuda.is_bf16_supported()
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
     stopper = EarlyStop(patience=t.get("early_stopping_patience", 15))
     grad_clip = t.get("grad_clip", 1.0)
+    max_epochs = t.get("max_epochs", 60)
 
     best_f1 = 0.0
     best_state = None
@@ -237,8 +265,18 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
     fold_train_start = time.perf_counter()
     collapse_streak = total_collapses = 0
 
-    for epoch in range(1, t.get("max_epochs", 60) + 1):
-        tr_loss, tr_acc, nan_b = _train_epoch(model, train_loader, optimizer, scaler, loss_fn, device, grad_clip)
+    run_dir = Path(config["output"]["run_dir"])
+    wb_run = _wandb_init(config, fold_idx, run_dir)
+
+    # Header
+    print(f"\n  {'Ep':>4} {'LR':>9} {'TrLoss':>8} {'TrAcc':>7} "
+          f"{'ValAUC':>8} {'ValF1':>7} {'Sens':>6} {'Spec':>6}  ES")
+    print(f"  {'-'*4} {'-'*9} {'-'*8} {'-'*7} {'-'*8} {'-'*7} {'-'*6} {'-'*6}  --")
+
+    for epoch in range(1, max_epochs + 1):
+        tr_loss, tr_acc, nan_b = _train_epoch(
+            model, train_loader, optimizer, scaler, loss_fn, device, grad_clip, epoch, max_epochs
+        )
         val_metrics, _, _ = _evaluate(model, val_loader, device)
 
         if sched_mode == "plateau":
@@ -246,13 +284,14 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
         else:
             scheduler.step()
 
-        # Collapse guard: restore if AUC collapses to chance
+        # Collapse guard
         if val_metrics["auc"] <= 0.5 and best_state is not None:
             collapse_streak += 1
             total_collapses += 1
             model.load_state_dict(best_state)
             stopper.step(best_f1)
             if collapse_streak >= 3 or total_collapses >= 8:
+                print(f"  Early exit: collapse guard triggered.")
                 break
             continue
         else:
@@ -262,11 +301,35 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
             best_f1 = val_metrics["f1"]
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-        rec = {"epoch": epoch, "train_loss": tr_loss, "train_acc": tr_acc, **val_metrics,
-               "lr": float(optimizer.param_groups[0]["lr"])}
+        lr_now = float(optimizer.param_groups[0]["lr"])
+        rec = {"epoch": epoch, "train_loss": tr_loss, "train_acc": tr_acc,
+               **val_metrics, "lr": lr_now}
         history.append(rec)
 
+        # Per-epoch log
+        es_mark = "*" if val_metrics["f1"] >= best_f1 else " "
+        print(f"  {epoch:>4} {lr_now:>9.2e} {tr_loss:>8.4f} {tr_acc:>7.4f} "
+              f"{val_metrics['auc']:>8.4f} {val_metrics['f1']:>7.4f} "
+              f"{val_metrics.get('sensitivity', 0):>6.4f} {val_metrics.get('specificity', 0):>6.4f}  {es_mark}")
+
+        if wb_run is not None:
+            wb_run.log({
+                "epoch": epoch,
+                "train/loss": tr_loss,
+                "train/acc": tr_acc,
+                "val/auc": val_metrics["auc"],
+                "val/f1": val_metrics["f1"],
+                "val/accuracy": val_metrics["accuracy"],
+                "val/sensitivity": val_metrics.get("sensitivity", 0),
+                "val/specificity": val_metrics.get("specificity", 0),
+                "val/precision": val_metrics.get("precision", 0),
+                "val/recall": val_metrics.get("recall", 0),
+                "lr": lr_now,
+                "nan_batches": nan_b,
+            })
+
         if stopper.step(val_metrics["auc"]):
+            print(f"  Early stopping at epoch {epoch} (patience={t.get('early_stopping_patience', 15)}).")
             break
 
     train_time = time.perf_counter() - fold_train_start
@@ -276,6 +339,17 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
 
     final_metrics, labels_arr, probs_arr = _evaluate(model, val_loader, device)
     final_metrics["training_time_sec"] = train_time
+
+    if wb_run is not None:
+        wb_run.summary.update({
+            "best_f1": best_f1,
+            "final_auc": final_metrics["auc"],
+            "final_f1": final_metrics["f1"],
+            "final_sensitivity": final_metrics.get("sensitivity", 0),
+            "final_specificity": final_metrics.get("specificity", 0),
+            "training_time_min": train_time / 60,
+        })
+        wb_run.finish()
 
     return model, {
         "fold": fold_idx + 1,
@@ -291,6 +365,12 @@ def run_crossval(config: dict) -> dict:
     run_dir = Path(config["output"]["run_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    model_name = config["model"]["name"]
+    print(f"\nTraining : {model_name}")
+    print(f"Device   : {device}" + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
+    print(f"Run dir  : {run_dir}")
+    print(f"wandb    : {'enabled' if config.get('wandb', {}).get('enabled') and WANDB_AVAILABLE else 'disabled'}\n")
+
     samples = build_binary_samples(
         data_root=config["data"]["data_root"],
         mb_class_name=config["data"].get("mb_class_name", "Meduloblastoma"),
@@ -300,6 +380,8 @@ def run_crossval(config: dict) -> dict:
         deduplicate=config["data"].get("deduplicate", True),
     )
     labels_arr = np.array([s.label for s in samples])
+    print(f"Dataset  : {len(samples)} samples  ({int(labels_arr.sum())} MB / {int(len(labels_arr) - labels_arr.sum())} non-MB)")
+
     splitter = StratifiedKFold(
         n_splits=config["training"].get("num_folds", 5),
         shuffle=True,
@@ -312,6 +394,12 @@ def run_crossval(config: dict) -> dict:
     for fold_idx, (tr_idx, va_idx) in enumerate(splitter.split(np.zeros(len(samples)), labels_arr)):
         tr = [samples[i] for i in tr_idx]
         va = [samples[i] for i in va_idx]
+
+        print(f"\n{'='*70}")
+        print(f"  FOLD {fold_idx + 1} / {config['training'].get('num_folds', 5)}"
+              f"   ({len(tr)} train / {len(va)} val)")
+        print(f"{'='*70}")
+
         model, result, f_labels, f_probs = train_fold(fold_idx, tr, va, config, device)
 
         torch.save({k: v.cpu() for k, v in model.state_dict().items()},
@@ -319,6 +407,13 @@ def run_crossval(config: dict) -> dict:
         fold_results.append(result)
         all_labels.append(f_labels)
         all_probs.append(f_probs)
+
+        m = result["metrics"]
+        print(f"\n  Fold {fold_idx + 1} result -> "
+              f"AUC={m['auc']:.4f}  F1={m['f1']:.4f}  "
+              f"Sens={m.get('sensitivity', 0):.4f}  Spec={m.get('specificity', 0):.4f}  "
+              f"Acc={m['accuracy']:.4f}  "
+              f"Time={m['training_time_sec']/60:.1f}min")
 
         if result["metrics"]["auc"] > best_auc:
             best_auc = result["metrics"]["auc"]

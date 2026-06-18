@@ -40,3 +40,8 @@ training:
 
 output:
   run_dir: experiments/runs/fpn_mamba
+
+wandb:
+  enabled: true
+  project: medulloblastoma-classification
+  entity: null

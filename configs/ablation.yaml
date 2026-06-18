@@ -37,3 +37,8 @@ training:
 
 output:
   run_dir: experiments/runs/ablation
+
+wandb:
+  enabled: true
+  project: medulloblastoma-classification
+  entity: null
