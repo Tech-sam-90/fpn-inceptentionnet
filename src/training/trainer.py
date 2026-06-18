@@ -153,8 +153,8 @@ def _train_epoch(model, loader, optimizer, scaler, loss_fn, device, grad_clip):
         imgs, labels = imgs.to(device), labels.to(device)
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.cuda.amp.autocast(enabled=device.type == "cuda", dtype=amp_dtype):
-            logits = model(imgs).squeeze(1)
+        with torch.amp.autocast('cuda', enabled=device.type == "cuda", dtype=amp_dtype):
+            logits = model(imgs).reshape(-1)
             loss = loss_fn(logits, labels)
 
         if not torch.isfinite(loss):
@@ -188,7 +188,7 @@ def _evaluate(model, loader, device, threshold=None):
     t0 = time.perf_counter()
 
     for imgs, labels in loader:
-        logits = model(imgs.to(device)).squeeze(1).cpu()
+        logits = model(imgs.to(device)).reshape(-1).cpu()
         probs = torch.sigmoid(logits).numpy()
         probs = np.where(np.isfinite(probs), probs, 0.5)
         all_probs.extend(probs.tolist())
@@ -227,7 +227,7 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
     optimizer, scheduler, sched_mode = _build_optimizer_scheduler(model, config, len(train_loader))
     # bfloat16 has wide dynamic range — GradScaler not needed, but harmless to keep
     use_scaler = device.type == "cuda" and not torch.cuda.is_bf16_supported()
-    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
     stopper = EarlyStop(patience=t.get("early_stopping_patience", 15))
     grad_clip = t.get("grad_clip", 1.0)
 
