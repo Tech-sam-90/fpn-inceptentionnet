@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from models.attention import SelfAttention2D  # noqa: F401 – re-exported for backward compatibility
+
 
 class ConvBnRelu(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0) -> None:
@@ -49,20 +51,6 @@ class ModifiedInceptionBlock(nn.Module):
 
         merged = torch.cat([b1, b2, b3, b4], dim=1)
         return self.downsample_after_concat(merged)
-
-
-class SelfAttention2D(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int) -> None:
-        super().__init__()
-        self.attention = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
-        self.norm = nn.LayerNorm(embed_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch, channels, height, width = x.shape
-        tokens = x.view(batch, channels, height * width).transpose(1, 2)
-        attn_out, _ = self.attention(tokens, tokens, tokens)
-        out = self.norm(tokens + attn_out)
-        return out.transpose(1, 2).view(batch, channels, height, width)
 
 
 class InceptentionNet(nn.Module):
