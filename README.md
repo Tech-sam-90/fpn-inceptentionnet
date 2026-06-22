@@ -161,16 +161,71 @@ python src/eval.py --run_id <run_id>
 
 ## 6. Status
 
-This repository is in an **early stage**:
-
-- [ ] Baseline InceptentionNet implementation
+- [x] Baseline InceptentionNet implementation
+- [x] Training and evaluation scripts
+- [x] Initial 5-fold cross-validation run on Kaggle data (see Section 6.1 for results)
 - [ ] FPN-InceptentionNet implementation
-- [ ] Training and evaluation scripts
 - [ ] Grad-CAM / attention visualization tools
-- [ ] Reproduction of baseline metrics on Kaggle data
+- [ ] Reproduction of baseline metrics on Kaggle data (see known issues in Section 6.1)
 - [ ] Comparative experiments (baseline vs. FPN)
 
 Updates will be pushed as the implementation and experiments progress.
+
+---
+
+## 6.1 Baseline Training Results
+
+Results are from a 5-fold stratified cross-validation run logged in
+`experiments/runs/inceptentionnet_baseline_notebook/cv_results.json`.
+
+### Dataset
+
+| Split | Count |
+|-------|-------|
+| Medulloblastoma (MB) | 106 |
+| Non-MB (13 other classes) | 630 |
+| **Total** | **736** |
+
+After 4× augmentation the training set contains approximately **2 944** samples.
+Training was performed on a CUDA GPU with `batch_size=2`, `image_size=128`,
+`learning_rate=0.005`, and `early_stopping_patience=10`.
+
+### 5-Fold Cross-Validation Summary
+
+| Metric | Mean | Std | Paper Target (Fang et al. 2025) | Gap |
+|--------|------|-----|--------------------------------|-----|
+| Accuracy | 0.856 | ±0.003 | 0.981 | −0.125 |
+| Precision | 0.000 | ±0.000 | 0.914 | −0.914 |
+| Recall | 0.000 | ±0.000 | 0.960 | −0.960 |
+| F1 Score | 0.000 | ±0.000 | 0.935 | −0.935 |
+| AUC | 0.500 | ±0.000 | 0.994 | −0.494 |
+
+### Per-Fold Results
+
+| Fold | Best Epoch | Best Val Loss | Accuracy | Precision | Recall | F1 | AUC |
+|------|-----------|--------------|----------|-----------|--------|----|-----|
+| 1 | 7 | 0.4204 | 0.851 | 0.000 | 0.000 | 0.000 | 0.500 |
+| 2 | 5 | 0.4204 | 0.857 | 0.000 | 0.000 | 0.000 | 0.500 |
+| 3 | 15 | 0.4084 | 0.857 | 0.000 | 0.000 | 0.000 | 0.500 |
+| 4 | 13 | 0.4084 | 0.857 | 0.000 | 0.000 | 0.000 | 0.500 |
+| 5 | 11 | 0.4084 | 0.857 | 0.000 | 0.000 | 0.000 | 0.500 |
+
+### Analysis
+
+The model converges quickly (best epoch between 5 and 15) but **collapses to
+predicting every sample as non-MB** across all five folds.  The ~85.6% accuracy
+is simply the majority-class rate; precision, recall, F1, and AUC all indicate
+no ability to distinguish MB from non-MB.
+
+**Root cause: unweighted binary cross-entropy on a severely imbalanced dataset.**
+The class ratio is roughly 1 : 5.9 (MB : non-MB).  Without a positive-class
+weight in `BCEWithLogitsLoss`, the loss is minimised by always predicting 0,
+which suffices to drive the loss below 0.41 while leaving recall at zero.
+
+**Fix applied in `src/train.py`:** `pos_weight` is now computed from the
+training fold class distribution and passed to `BCEWithLogitsLoss`.  This
+rescales the gradient contribution of the minority class and is the standard
+PyTorch mechanism for handling imbalanced binary classification.
 
 ---
 
