@@ -1,0 +1,43 @@
+seed: 42
+
+model:
+  name: resnet50
+  timm_model: resnet50
+  pretrained: true
+  freeze_layers: 2        # freeze stem + layer1; fine-tune layer2-layer4
+  dropout: 0.3
+  hidden_dim: 256
+
+data:
+  data_root: data
+  mb_class_name: Meduloblastoma
+  mb_target_count: 131
+  non_mb_target_count: 630
+  image_size: 224
+  gaussian_sigma: 0.7
+  imagenet_norm: true
+  deduplicate: true
+
+training:
+  num_folds: 5
+  batch_size: 64
+  max_epochs: 60
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  early_stopping_patience: 15
+  warmup_epochs: 10
+  grad_clip: 1.0
+  use_weighted_sampler: true
+  use_mb_transform: true
+  label_smoothing: 0.05
+  pos_weight_scale: 1.0
+  use_cuda: true
+  num_workers: 0
+
+output:
+  run_dir: experiments/runs/resnet50
+
+wandb:
+  enabled: true
+  project: medulloblastoma-classification
+  entity: sadeniji-carnegie-mellon-university

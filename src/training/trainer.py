@@ -22,6 +22,7 @@ from src.evaluation.metrics import compute_metrics, find_best_threshold
 from src.models.inceptentionnet import InceptentionNet
 from src.models.fpn_mamba import FPNMambaClassifier
 from src.models.ablation import build_ablation_model
+from src.models.timm_classifier import TimmClassifier
 from src.training.losses import bce_loss, compute_pos_weight, weighted_bce_smooth
 from src.utils.seed import seed_everything
 
@@ -73,6 +74,18 @@ def _build_model(config: dict) -> nn.Module:
             use_gem=m.get("use_gem", True),
             use_se=m.get("use_se", True),
         )
+    if m.get("timm_model") or name not in ("inceptentionnet", "fpn_mamba", "fpn_mamba_full"):
+        timm_name = m.get("timm_model", name)
+        try:
+            return TimmClassifier(
+                model_name=timm_name,
+                pretrained=m.get("pretrained", True),
+                dropout=m.get("dropout", 0.3),
+                freeze_layers=m.get("freeze_layers", 2),
+                hidden_dim=m.get("hidden_dim", 256),
+            )
+        except Exception:
+            pass
     return build_ablation_model(name, dropout=m.get("dropout", 0.3))
 
 
