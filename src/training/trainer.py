@@ -109,21 +109,43 @@ def _build_model(config: dict) -> nn.Module:
     return build_ablation_model(name, dropout=m.get("dropout", 0.3))
 
 
-def _make_calibration_split(train_samples: list, calib_fraction: float, seed: int):
+def _make_calibration_split(
+    train_samples: list,
+    calib_fraction: float,
+    seed: int,
+    min_calib_positives: int = 20,
+    max_calib_fraction: float = 0.30,
+):
     """
     Splits an outer fold's training portion into an inner-train set (used for
     gradient updates) and a calibration set (used only for early stopping,
     checkpoint selection, and threshold selection). The outer fold's held-out
     set is never touched by this split.
+
+    `calib_fraction` is bumped up (up to `max_calib_fraction`) if needed so the
+    calibration set contains at least `min_calib_positives` minority-class
+    examples. With only ~106-131 MB images in the whole dataset, a flat 15%
+    split can leave as few as 13 calibration positives -- too small a sample
+    to reliably estimate a Youden's-J threshold, which is what caused the
+    fold-to-fold threshold instability seen after the leakage fix.
     """
-    labels = [s.label for s in train_samples]
-    idx = np.arange(len(train_samples))
+    labels = np.array([s.label for s in train_samples])
+    n = len(train_samples)
+    n_pos = int(labels.sum())
+    pos_ratio = n_pos / n if n > 0 else 0.0
+
+    effective_fraction = calib_fraction
+    if pos_ratio > 0:
+        required_fraction = min_calib_positives / (pos_ratio * n)
+        effective_fraction = min(max(calib_fraction, required_fraction), max_calib_fraction)
+
+    idx = np.arange(n)
     inner_idx, calib_idx = train_test_split(
-        idx, test_size=calib_fraction, stratify=labels, random_state=seed
+        idx, test_size=effective_fraction, stratify=labels, random_state=seed
     )
     inner = [train_samples[i] for i in inner_idx]
     calib = [train_samples[i] for i in calib_idx]
-    return inner, calib
+    return inner, calib, effective_fraction
 
 
 def _build_dataloaders(inner_train_samples, calib_samples, held_out_samples, config: dict):
@@ -270,6 +292,29 @@ def _evaluate(model, loader, device, threshold=None):
     return metrics, la, pb
 
 
+def _bootstrap_threshold(labels: np.ndarray, probs: np.ndarray, seed: int, n_bootstrap: int = 200):
+    """
+    Youden's-J threshold taken as the median over `n_bootstrap` resamples
+    (with replacement) of the calibration set, instead of a single-pass point
+    estimate. With as few as ~15-20 positive calibration examples, one draw of
+    `find_best_threshold` is highly sensitive to exactly which examples ended
+    up in the split; bootstrapping smooths that out without requiring any
+    additional data. Returns (median_threshold, std_of_thresholds).
+    """
+    rng = np.random.RandomState(seed)
+    n = len(labels)
+    thresholds = []
+    for _ in range(n_bootstrap):
+        sample_idx = rng.randint(0, n, size=n)
+        boot_labels = labels[sample_idx]
+        if len(np.unique(boot_labels)) < 2:
+            continue
+        thresholds.append(find_best_threshold(boot_labels, probs[sample_idx]))
+    if not thresholds:
+        return find_best_threshold(labels, probs), 0.0
+    return float(np.median(thresholds)), float(np.std(thresholds))
+
+
 def _wandb_init(config: dict, fold_idx: int, run_dir: Path):
     """Start a wandb run for one fold. Returns the run or None if wandb is disabled."""
     wcfg = config.get("wandb", {})
@@ -304,8 +349,11 @@ def train_fold(fold_idx: int, train_samples, held_out_samples, config: dict, dev
     # `held_out_samples` (the outer fold) is NEVER used below until the single
     # final evaluation at the bottom of this function.
     calib_fraction = t.get("calibration_fraction", 0.15)
-    inner_train_samples, calib_samples = _make_calibration_split(
-        train_samples, calib_fraction, seed=config.get("seed", 42) + fold_idx
+    min_calib_positives = t.get("min_calibration_positives", 20)
+    max_calib_fraction = t.get("max_calibration_fraction", 0.30)
+    inner_train_samples, calib_samples, effective_calib_fraction = _make_calibration_split(
+        train_samples, calib_fraction, seed=config.get("seed", 42) + fold_idx,
+        min_calib_positives=min_calib_positives, max_calib_fraction=max_calib_fraction,
     )
 
     model = _build_model(config).to(device)
@@ -321,8 +369,7 @@ def train_fold(fold_idx: int, train_samples, held_out_samples, config: dict, dev
         # pos_weight penalises MB false negatives; keeps BCE (no smoothing) to match paper spirit
         loss_fn = lambda logits, labels: weighted_bce_smooth(logits, labels, pos_weight, 0.0)
     else:
-        pw = pos_weight * 0.6 if fold_idx == 1 else pos_weight
-        loss_fn = lambda logits, labels: weighted_bce_smooth(logits, labels, pw, label_smoothing)
+        loss_fn = lambda logits, labels: weighted_bce_smooth(logits, labels, pos_weight, label_smoothing)
 
     optimizer, scheduler, sched_mode = _build_optimizer_scheduler(model, config, len(train_loader))
     use_scaler = device.type == "cuda" and not torch.cuda.is_bf16_supported()
@@ -412,15 +459,21 @@ def train_fold(fold_idx: int, train_samples, held_out_samples, config: dict, dev
         model.load_state_dict(best_state)
 
     # Threshold is selected on the calibration split -- NOT on the held-out fold.
-    calib_final, _, _ = _evaluate(model, calib_loader, device)
-    selected_threshold = calib_final["threshold"]
+    # Taken as a bootstrap-smoothed median rather than a single-pass Youden's-J
+    # pick, since the calibration set can be as small as ~15-20 positives.
+    calib_final, calib_labels_arr, calib_probs_arr = _evaluate(model, calib_loader, device)
+    selected_threshold, threshold_std = _bootstrap_threshold(
+        calib_labels_arr, calib_probs_arr, seed=config.get("seed", 42) + fold_idx
+    )
 
     # The outer held-out fold is touched exactly once, here, with a threshold
     # that was fixed without any access to it. These are the fold's reported metrics.
     final_metrics, labels_arr, probs_arr = _evaluate(model, held_out_loader, device, threshold=selected_threshold)
     final_metrics["training_time_sec"] = train_time
     final_metrics["calibration_threshold"] = selected_threshold
-    final_metrics["calibration_fraction"] = calib_fraction
+    final_metrics["calibration_threshold_std"] = threshold_std
+    final_metrics["calibration_fraction"] = effective_calib_fraction
+    final_metrics["calibration_num_positives"] = int(calib_labels_arr.sum())
 
     if wb_run is not None:
         wb_run.summary.update({
@@ -430,6 +483,7 @@ def train_fold(fold_idx: int, train_samples, held_out_samples, config: dict, dev
             "final_sensitivity": final_metrics.get("sensitivity", 0),
             "final_specificity": final_metrics.get("specificity", 0),
             "calibration_threshold": selected_threshold,
+            "calibration_threshold_std": threshold_std,
             "training_time_min": train_time / 60,
         })
         wb_run.finish()

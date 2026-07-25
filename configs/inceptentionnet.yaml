@@ -29,6 +29,8 @@ training:
   warmup_epochs: 0
   grad_clip: 1.0
   calibration_fraction: 0.15    # fraction of each fold's training data held out for early stopping / threshold selection
+  min_calibration_positives: 20 # bumps calibration_fraction up (capped below) if the calib set would have fewer MB positives than this
+  max_calibration_fraction: 0.30 # safety cap on how far min_calibration_positives can push calibration_fraction up
   use_weighted_sampler: true
   use_mb_transform: false
   augmentation_factor: 4        # paper: augmented 736 → 2944 images (×4)
