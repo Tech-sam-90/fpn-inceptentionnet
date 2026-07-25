@@ -1,6 +1,26 @@
 """
-Unified cross-validation trainer for both InceptentionNet and FPN-Mamba.
+Unified cross-validation trainer for InceptentionNet, ResNet-50, EfficientNet-B2
+ablation variants, and FPN-Mamba.
 Model, optimizer, scheduler, loss, and sampler are all config-driven.
+
+NESTED CALIBRATION SPLIT (fixes reviewer-flagged validation leakage)
+---------------------------------------------------------------------
+Previously, each outer CV fold's validation set (`va`) was used for THREE
+things simultaneously: (1) per-epoch early stopping / checkpoint selection
+during training, (2) Youden's-J threshold selection, and (3) the final
+reported metrics for that fold. That is a form of leakage/optimism: the
+same data that picks the model and the operating point is also the data
+the paper reports performance on.
+
+The fix: each outer fold's *training* portion is further split into an
+inner-train set (used for gradient updates) and a small calibration set
+(used ONLY for early stopping, checkpoint selection, and threshold
+selection). The outer fold's held-out set is now touched exactly once,
+at the very end, with a threshold that was fixed on the calibration
+split -- never on the held-out data itself. This applies identically to
+every model trained through `run_crossval`, so InceptentionNet, ResNet-50,
+EfficientNet-B2+GAP, and FPN-Mamba are all compared under the same
+(now-unbiased) protocol.
 """
 from __future__ import annotations
 
@@ -12,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -89,7 +109,24 @@ def _build_model(config: dict) -> nn.Module:
     return build_ablation_model(name, dropout=m.get("dropout", 0.3))
 
 
-def _build_dataloaders(train_samples, val_samples, config: dict):
+def _make_calibration_split(train_samples: list, calib_fraction: float, seed: int):
+    """
+    Splits an outer fold's training portion into an inner-train set (used for
+    gradient updates) and a calibration set (used only for early stopping,
+    checkpoint selection, and threshold selection). The outer fold's held-out
+    set is never touched by this split.
+    """
+    labels = [s.label for s in train_samples]
+    idx = np.arange(len(train_samples))
+    inner_idx, calib_idx = train_test_split(
+        idx, test_size=calib_fraction, stratify=labels, random_state=seed
+    )
+    inner = [train_samples[i] for i in inner_idx]
+    calib = [train_samples[i] for i in calib_idx]
+    return inner, calib
+
+
+def _build_dataloaders(inner_train_samples, calib_samples, held_out_samples, config: dict):
     d = config["data"]
     t = config["training"]
     cfg = TransformConfig(
@@ -101,10 +138,11 @@ def _build_dataloaders(train_samples, val_samples, config: dict):
     mb_tf = build_mb_transform(cfg) if t.get("use_mb_transform", True) else None
     eval_tf = build_eval_transform(cfg)
 
-    train_labels = [s.label for s in train_samples]
+    train_labels = [s.label for s in inner_train_samples]
     aug_factor = t.get("augmentation_factor", 1)
-    train_ds = BrainTumorDataset(train_samples, train_tf, mb_transform=mb_tf, augmentation_factor=aug_factor)
-    val_ds = FoldEvalDataset(val_samples, eval_tf)
+    train_ds = BrainTumorDataset(inner_train_samples, train_tf, mb_transform=mb_tf, augmentation_factor=aug_factor)
+    calib_ds = FoldEvalDataset(calib_samples, eval_tf)
+    held_out_ds = FoldEvalDataset(held_out_samples, eval_tf)
 
     sampler = make_weighted_sampler(train_labels) if t.get("use_weighted_sampler", True) else None
     train_loader = DataLoader(
@@ -116,14 +154,21 @@ def _build_dataloaders(train_samples, val_samples, config: dict):
         pin_memory=True,
         drop_last=True,
     )
-    val_loader = DataLoader(
-        val_ds,
+    calib_loader = DataLoader(
+        calib_ds,
         batch_size=t.get("batch_size", 16),
         shuffle=False,
         num_workers=t.get("num_workers", 0),
         pin_memory=True,
     )
-    return train_loader, val_loader, train_labels
+    held_out_loader = DataLoader(
+        held_out_ds,
+        batch_size=t.get("batch_size", 16),
+        shuffle=False,
+        num_workers=t.get("num_workers", 0),
+        pin_memory=True,
+    )
+    return train_loader, calib_loader, held_out_loader, train_labels
 
 
 def _build_optimizer_scheduler(model: nn.Module, config: dict, steps_per_epoch: int):
@@ -251,12 +296,22 @@ def _wandb_init(config: dict, fold_idx: int, run_dir: Path):
     return run
 
 
-def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: torch.device):
+def train_fold(fold_idx: int, train_samples, held_out_samples, config: dict, device: torch.device):
     t = config["training"]
     seed_everything(config.get("seed", 42) + fold_idx)
 
+    # --- NESTED SPLIT: carve a calibration set out of this fold's training data.
+    # `held_out_samples` (the outer fold) is NEVER used below until the single
+    # final evaluation at the bottom of this function.
+    calib_fraction = t.get("calibration_fraction", 0.15)
+    inner_train_samples, calib_samples = _make_calibration_split(
+        train_samples, calib_fraction, seed=config.get("seed", 42) + fold_idx
+    )
+
     model = _build_model(config).to(device)
-    train_loader, val_loader, train_labels = _build_dataloaders(train_samples, val_samples, config)
+    train_loader, calib_loader, held_out_loader, train_labels = _build_dataloaders(
+        inner_train_samples, calib_samples, held_out_samples, config
+    )
 
     pos_weight = compute_pos_weight(train_labels, t.get("pos_weight_scale", 1.0))
     label_smoothing = t.get("label_smoothing", 0.0)
@@ -287,22 +342,24 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
 
     # Header
     print(f"\n  {'Ep':>4} {'LR':>9} {'TrLoss':>8} {'TrAcc':>7} "
-          f"{'ValAUC':>8} {'ValF1':>7} {'Sens':>6} {'Spec':>6}  ES")
+          f"{'CalAUC':>8} {'CalF1':>7} {'Sens':>6} {'Spec':>6}  ES")
     print(f"  {'-'*4} {'-'*9} {'-'*8} {'-'*7} {'-'*8} {'-'*7} {'-'*6} {'-'*6}  --")
 
     for epoch in range(1, max_epochs + 1):
         tr_loss, tr_acc, nan_b = _train_epoch(
             model, train_loader, optimizer, scaler, loss_fn, device, grad_clip, epoch, max_epochs
         )
-        val_metrics, _, _ = _evaluate(model, val_loader, device)
+        # Early stopping / checkpoint selection use the CALIBRATION split only.
+        # The outer held-out fold is not evaluated at all during training.
+        calib_metrics, _, _ = _evaluate(model, calib_loader, device)
 
         if sched_mode == "plateau":
-            scheduler.step(val_metrics["auc"])
+            scheduler.step(calib_metrics["auc"])
         else:
             scheduler.step()
 
         # Collapse guard
-        if val_metrics["auc"] <= 0.5 and best_state is not None:
+        if calib_metrics["auc"] <= 0.5 and best_state is not None:
             collapse_streak += 1
             total_collapses += 1
             model.load_state_dict(best_state)
@@ -314,38 +371,38 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
         else:
             collapse_streak = 0
 
-        if val_metrics["f1"] > best_f1:
-            best_f1 = val_metrics["f1"]
+        if calib_metrics["f1"] > best_f1:
+            best_f1 = calib_metrics["f1"]
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
         lr_now = float(optimizer.param_groups[0]["lr"])
         rec = {"epoch": epoch, "train_loss": tr_loss, "train_acc": tr_acc,
-               **val_metrics, "lr": lr_now}
+               **calib_metrics, "lr": lr_now}
         history.append(rec)
 
         # Per-epoch log
-        es_mark = "*" if val_metrics["f1"] >= best_f1 else " "
+        es_mark = "*" if calib_metrics["f1"] >= best_f1 else " "
         print(f"  {epoch:>4} {lr_now:>9.2e} {tr_loss:>8.4f} {tr_acc:>7.4f} "
-              f"{val_metrics['auc']:>8.4f} {val_metrics['f1']:>7.4f} "
-              f"{val_metrics.get('sensitivity', 0):>6.4f} {val_metrics.get('specificity', 0):>6.4f}  {es_mark}")
+              f"{calib_metrics['auc']:>8.4f} {calib_metrics['f1']:>7.4f} "
+              f"{calib_metrics.get('sensitivity', 0):>6.4f} {calib_metrics.get('specificity', 0):>6.4f}  {es_mark}")
 
         if wb_run is not None:
             wb_run.log({
                 "epoch": epoch,
                 "train/loss": tr_loss,
                 "train/acc": tr_acc,
-                "val/auc": val_metrics["auc"],
-                "val/f1": val_metrics["f1"],
-                "val/accuracy": val_metrics["accuracy"],
-                "val/sensitivity": val_metrics.get("sensitivity", 0),
-                "val/specificity": val_metrics.get("specificity", 0),
-                "val/precision": val_metrics.get("precision", 0),
-                "val/recall": val_metrics.get("recall", 0),
+                "calib/auc": calib_metrics["auc"],
+                "calib/f1": calib_metrics["f1"],
+                "calib/accuracy": calib_metrics["accuracy"],
+                "calib/sensitivity": calib_metrics.get("sensitivity", 0),
+                "calib/specificity": calib_metrics.get("specificity", 0),
+                "calib/precision": calib_metrics.get("precision", 0),
+                "calib/recall": calib_metrics.get("recall", 0),
                 "lr": lr_now,
                 "nan_batches": nan_b,
             })
 
-        if stopper.step(val_metrics["auc"]):
+        if stopper.step(calib_metrics["auc"]):
             print(f"  Early stopping at epoch {epoch} (patience={t.get('early_stopping_patience', 15)}).")
             break
 
@@ -354,8 +411,16 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    final_metrics, labels_arr, probs_arr = _evaluate(model, val_loader, device)
+    # Threshold is selected on the calibration split -- NOT on the held-out fold.
+    calib_final, _, _ = _evaluate(model, calib_loader, device)
+    selected_threshold = calib_final["threshold"]
+
+    # The outer held-out fold is touched exactly once, here, with a threshold
+    # that was fixed without any access to it. These are the fold's reported metrics.
+    final_metrics, labels_arr, probs_arr = _evaluate(model, held_out_loader, device, threshold=selected_threshold)
     final_metrics["training_time_sec"] = train_time
+    final_metrics["calibration_threshold"] = selected_threshold
+    final_metrics["calibration_fraction"] = calib_fraction
 
     if wb_run is not None:
         wb_run.summary.update({
@@ -364,6 +429,7 @@ def train_fold(fold_idx: int, train_samples, val_samples, config: dict, device: 
             "final_f1": final_metrics["f1"],
             "final_sensitivity": final_metrics.get("sensitivity", 0),
             "final_specificity": final_metrics.get("specificity", 0),
+            "calibration_threshold": selected_threshold,
             "training_time_min": train_time / 60,
         })
         wb_run.finish()
@@ -414,7 +480,8 @@ def run_crossval(config: dict) -> dict:
 
         print(f"\n{'='*70}")
         print(f"  FOLD {fold_idx + 1} / {num_folds}"
-              f"   ({len([samples[i] for i in tr_idx])} train / {len([samples[i] for i in va_idx])} val)")
+              f"   ({len([samples[i] for i in tr_idx])} train [incl. calibration split]"
+              f" / {len([samples[i] for i in va_idx])} held-out)")
         print(f"{'='*70}")
 
         if fold_result_path.exists():
@@ -459,6 +526,15 @@ def run_crossval(config: dict) -> dict:
     if best_state is not None:
         torch.save(best_state, run_dir / "best_model.pt")
 
+    # Aggregate confusion counts across folds, built from each fold's already-
+    # thresholded (calibration-selected) predictions. This is what Fig. 2 /
+    # the aggregate confusion matrix should be regenerated from, so the figure
+    # and the reported sensitivity/specificity numbers can never diverge again.
+    agg_tp = sum(fr["metrics"].get("tp", 0) for fr in fold_results)
+    agg_tn = sum(fr["metrics"].get("tn", 0) for fr in fold_results)
+    agg_fp = sum(fr["metrics"].get("fp", 0) for fr in fold_results)
+    agg_fn = sum(fr["metrics"].get("fn", 0) for fr in fold_results)
+
     payload = {
         "config": config,
         "device": str(device),
@@ -466,6 +542,9 @@ def run_crossval(config: dict) -> dict:
         "num_mb": int(labels_arr.sum()),
         "num_non_mb": int(len(labels_arr) - labels_arr.sum()),
         "fold_results": fold_results,
+        "aggregate_confusion_matrix": {
+            "tp": int(agg_tp), "tn": int(agg_tn), "fp": int(agg_fp), "fn": int(agg_fn)
+        },
     }
     with (run_dir / "cv_results.json").open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, default=str)

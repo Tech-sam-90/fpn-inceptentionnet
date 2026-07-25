@@ -28,6 +28,7 @@ training:
   early_stopping_patience: 15
   warmup_epochs: 10
   grad_clip: 0.3
+  calibration_fraction: 0.15    # fraction of each fold's training data held out for early stopping / threshold selection
   use_weighted_sampler: true
   use_mb_transform: true
   label_smoothing: 0.05
