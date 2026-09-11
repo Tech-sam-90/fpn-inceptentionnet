@@ -1,0 +1,5 @@
+device: cuda
+Unexpected keys (bn2.num_batches_tracked, bn2.bias, bn2.running_mean, bn2.running_var, bn2.weight, classifier.bias, classifier.weight, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+fpn_mamba_full @ 256px: 51.8 ms/step  77.1 samples/s  peak_mem=2.39GB  params=12,719,108
+Unexpected keys (bn2.num_batches_tracked, bn2.bias, bn2.running_mean, bn2.running_var, bn2.weight, classifier.bias, classifier.weight, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+fpn_mamba_full @ 512px: 153.9 ms/step  26.0 samples/s  peak_mem=8.99GB  params=12,719,108

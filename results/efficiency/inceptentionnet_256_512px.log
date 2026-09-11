@@ -1,0 +1,3 @@
+device: cuda
+inceptentionnet @ 256px: 28.1 ms/step  142.2 samples/s  peak_mem=0.95GB  params=1,077,825
+inceptentionnet @ 512px: 242.0 ms/step  16.5 samples/s  peak_mem=3.68GB  params=1,077,825

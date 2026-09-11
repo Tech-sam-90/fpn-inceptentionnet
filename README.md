@@ -1,207 +1,132 @@
-# FPN-Mamba: Multi-Scale Medulloblastoma Classification in Brain MRI
+# FPN-Mamba vs. InceptentionNet -- comparison bundle
 
-This repository contains the implementation of **FPN-Mamba**, an architecture that integrates a **Feature Pyramid Network (FPN)** with **Bidirectional Mamba State Space Models** for binary classification of medulloblastoma (MB) in brain MRI. The work is motivated by and compared against InceptentionNet:
+Self-contained snapshot of the code and results behind `REPORT.md` (metrics + efficiency
+comparison between `fpn_mamba_full` and `inceptentionnet` on the UCSF-BMSR brain-metastasis
+screening task). Read `REPORT.md` first -- this README only covers how to reproduce it.
 
-> Fang C, Li C, Liu H, et al. Precise identification of medulloblastoma in MRI images using a convolutional neural network integrated with a self-attention mechanism. *Digital Health*. 2025;11:20552076251351536.
+**Base commit**: `4a6ac28afd336a8fc51021d53ee9b3dfae92f88d` (branch `version_2` of the main repo)
+plus uncommitted working-tree files at the time this bundle was made -- every file under `code/`
+here is a snapshot copy, not a live symlink, since several of them were not yet committed.
 
----
+## Layout
 
-## 1. Project Overview
-
-Medulloblastoma is the most common malignant brain tumor in children, accounting for approximately 20% of all pediatric brain tumors. Early and accurate identification is critical because a missed diagnosis delays treatment during the period of greatest therapeutic opportunity.
-
-InceptentionNet achieves strong binary classification performance but applies self-attention to a **single, downsampled feature map**. This means the model reasons at one coarse spatial scale, which limits its sensitivity to small lesions, weakly contrasted tumors, and atypically located masses — precisely the cases identified in Fang et al.'s own error analysis as the dominant source of false negatives.
-
-FPN-Mamba addresses this through two simultaneous design changes:
-
-1. **Multi-scale feature hierarchy via FPN** — every pyramid level from fine (56×56) to coarse (7×7) reaches the classifier, so no presentation is structurally excluded from detection.
-2. **Linear-complexity global context via Mamba** — Bidirectional Mamba State Space Models replace self-attention at each pyramid level, operating in O(L) time rather than O(L²). This makes global context modeling feasible at fine spatial resolutions where self-attention would be computationally prohibitive.
-
-The improved metrics are a downstream consequence of this architectural design. The primary objective is clinical: reducing the false negative rate for the hardest MB cases.
-
----
-
-## 2. Architecture
-
-FPN-Mamba consists of four functional stages:
-
-### 2.1 EfficientNet-B2 Backbone
-- ImageNet pretrained, accessed via `timm` in features-only mode
-- Outputs four feature levels: C2 (56×56, 24ch), C3 (28×28, 48ch), C4 (14×14, 120ch), C5 (7×7, 352ch)
-- First three child modules frozen; deeper modules fine-tuned
-- Backbone channels probed dynamically at initialisation to avoid hardcoded dimension bugs
-
-### 2.2 FPN Neck with LocalityMixing
-- Lateral 1×1 convolutions project every level to 256 channels
-- Top-down pathway adds upsampled deeper features to shallower lateral projections
-- The standard 3×3 FPN smoothing convolution is **replaced at every level** by a **LocalityMixing block**:
-  - Depthwise 3×3 conv for local neighbourhood refinement
-  - Bidirectional Mamba SSM for full-image global context (O(L) complexity)
-  - Learned sigmoid gate blends local and global per spatial position
-  - Serialises BCHW → B(HW)C for Mamba, then deserialises back to BCHW
-
-### 2.3 Cross-Scale Bidirectional Mamba
-- All four pyramid levels (P2–P5) are flattened and concatenated into one sequence
-- A single Bidirectional Mamba scan propagates context across levels simultaneously
-- Output is split by known token counts and deserialized to per-level spatial maps
-- Enables fine-scale evidence (P2) to directly inform coarse-scale semantics (P5) and vice versa
-
-### 2.4 Classification Head
-- **GeM Pooling** (learned p=3): pools each pyramid level independently, emphasising high-activation positions over background tissue
-- **SE Channel Attention** (1024→64→1024): recalibrates which of the 1024 concatenated channels are most informative for MB classification
-- **FC Head**: Linear(1024→512) BN GELU Dropout(0.3) → Linear(512→128) GELU Dropout(0.15) → Linear(128→1) → Sigmoid
-
----
-
-## 3. Data
-
-### 3.1 Training and Internal Validation Data
-
-**Source:** Kaggle – *Brain Tumor for 14 classes*  
-**Link:** https://www.kaggle.com/datasets/waseemnagahhenes/brain-tumor-for-14-classes
-
-We follow the data selection described by Fang et al. (2025):
-
-- 131 original medulloblastoma (MB) images in the Kaggle dataset.
-- 25 duplicate MB images removed (pHash + manual review).
-- Final MB images: **106**.
-- 636 non-MB images randomly selected from the remaining 13 classes.
-- 6 duplicate non-MB images removed.
-- Final non-MB images: **630**.
-- Total: **736** images.
-- After augmentation (rotation, flipping, zooming): **2944** images.
-
-**Important:** We only use the **Kaggle dataset**, which is public.  
-The **clinical external validation dataset** from Shanghai Children’s Medical Center used in the original paper is **not publicly available**, so it is **not included** in this repository.
-
-### 3.2 Labels
-
-- Positive class: **Medulloblastoma (MB)** images.
-- Negative class: **Non-MB** images (other tumor types and normal).
-
-Labels are derived from the directory structure / class names provided in the Kaggle dataset and then consolidated into a binary label.
-
----
-
-## 4. Repository Structure (Planned)
-
-> Note: This is an initial layout and may evolve as code is added.
-
-```text
-.
-├── data/
-│   └── README.md           # Instructions on downloading and organizing Kaggle data
-├── notebooks/
-│   └── exploration.ipynb   # Data exploration, sanity checks, sample visualizations
-├── src/
-│   ├── datasets.py         # Dataset and dataloader utilities
-│   ├── transforms.py       # Preprocessing and augmentation pipelines
-│   ├── models/
-│   │   ├── inceptentionnet.py      # Baseline InceptentionNet implementation
-│   │   ├── fpn_inceptentionnet.py  # Proposed FPN-InceptentionNet
-│   │   └── attention.py            # Self-attention modules
-│   ├── train.py            # Training loop and cross-validation
-│   ├── eval.py             # Evaluation and metrics
-│   └── visualization.py    # Grad-CAM and attention heatmaps
-├── experiments/
-│   └── configs/            # YAML/JSON configs for experiments
-├── Literatures/            # Papers and references
-├── Writeups/               # Project writeups / notes
-├── README.md               # Project overview and instructions
-└── requirements.txt        # Python dependencies
+```
+REPORT.md                    -- the write-up: metrics + efficiency, with p-values
+code/
+  src/models/inceptentionnet.py       -- InceptentionNet architecture
+  src/training/ucsf_bmsr_pipeline.py  -- main-venv dataset + train_one_fold (inceptentionnet, efficientnet_only, resnet50/18)
+  scripts/kernel_fpn_mamba.py         -- FPNMambaClassifier + ABLATION_VARIANTS (kernel-fused Mamba)
+  scripts/kernel_ucsf_pipeline.py     -- kernel-venv dataset + train_one_fold (fpn_mamba_full and ablation ladder)
+  scripts/run_ablation_fold.py        -- full-slice 256px screening runner (main venv)
+  scripts/run_kernel_ablation_fold.py -- full-slice 256px screening runner (kernel venv)
+  scripts/run_crop_fold.py            -- crop-based per-modality runner (main venv)
+  scripts/run_crop_kernel_fold.py     -- crop-based per-modality runner (kernel venv)
+  scripts/run_crop_main_parallel.sbatch, run_crop_kernel_parallel.sbatch  -- 3-GPU sbatch wrappers
+  scripts/consolidate_final_results.py     -- builds the full-slice significance/summary CSVs
+  scripts/crop_permodality_significance.py -- builds the crop-based significance/summary CSVs
+  scripts/benchmark_inceptentionnet_full.py, benchmark_kernel_full_model_512.py -- efficiency benchmarks
+results/
+  full_slice_screening/    -- 256px, 3 folds, seed 42 (REPORT.md Section 1a)
+  crop_permodality/        -- 128px lesion-centered crops, per-modality input, 3 folds, seed 42 (REPORT.md Section 1b)
+  efficiency/              -- raw benchmark logs, 256px + 512px, batch=4, single A100 (REPORT.md Section 2)
 ```
 
----
+## Environment
 
-## 5. Getting Started
+Two separate virtualenvs, kept apart because `mamba-ssm`'s CUDA kernel pins an older torch:
 
-### 5.1 Environment
+- **Main venv** (torch 2.12.0): runs everything with no Mamba component --
+  `inceptentionnet`, `efficientnet_only`, `resnet50`/`resnet18`.
+- **Kernel venv** (`~/venv_mamba_kernel`: torch 2.5.1, `mamba-ssm==2.2.4`, `causal-conv1d`, `timm`,
+  scikit-learn/scipy/pandas, all installed `--no-index` from the Compute Canada wheelhouse): runs
+  every `fpn_*` variant (`fpn_locality`, `fpn_cross_mamba`, `fpn_mamba_full`, `fpn_mamba_full_topk`).
 
-- Python ≥ 3.9
-- PyTorch (or preferred deep learning framework)
-- CUDA-enabled GPU is strongly recommended
+`code/` mirrors the original repo's package layout (`src/models/...`, `src/training/...`,
+`scripts/...`) so the runner scripts' imports resolve unmodified if this folder is dropped in
+place of (or merged into) a checkout of the main repo at the base commit above.
 
-Install dependencies:
+## Data
+
+Requires the UCSF-BMSR extraction pipeline's outputs (not included here -- regenerate via the
+main repo's `data/ucsf-bmsr/run_extraction_fullslice.py` and the crop-based equivalent, or point
+at an existing `pipeline_output_fullslice_256/` and `pipeline_output/` directory):
+
+- **Full-slice screening**: `pipeline_output_fullslice_256/manifest_with_folds.csv` +
+  `pipeline_output_fullslice_256/crops/` (256px canonical-FOV slices).
+- **Crop-based per-modality**: `pipeline_output/manifest_with_folds.csv` +
+  `pipeline_output/crops/` (100mm lesion-centered crops, `t1post`/`subtraction`/`flair` all saved
+  per record).
+
+Edit `OUTPUT_DIR` near the top of each `run_*.py` if your paths differ from the originals'
+(`/lustre07/scratch/joyinola/fpn_mamba/data/ucsf-bmsr/...`).
+
+## Reproducing REPORT.md Section 1a (full-slice screening, 3 folds, seed 42)
 
 ```bash
-pip install -r requirements.txt
+# main venv
+source ~/venv/bin/activate
+for variant in inceptentionnet efficientnet_only; do
+  for fold in 0 1 2; do
+    python3 code/scripts/run_ablation_fold.py --variant $variant --fold $fold
+  done
+done
+
+# kernel venv
+source ~/venv_mamba_kernel/bin/activate
+for fold in 0 1 2; do
+  python3 code/scripts/run_kernel_ablation_fold.py --variant fpn_mamba_full --fold $fold
+done
+
+# back in main venv: builds paper_final_results_flat.csv, paper_final_significance.csv,
+# paper_final_size_stratified.csv from the per-fold result JSONs
+source ~/venv/bin/activate
+python3 code/scripts/consolidate_final_results.py
 ```
 
-### 5.2 Data Setup
-
-1. Download the Kaggle dataset:
-
-   - Go to:  
-     https://www.kaggle.com/datasets/waseemnagahhenes/brain-tumor-for-14-classes
-   - Download and extract it under `data/brain_tumor_14_classes/` (or follow the path specified in `data/README.md` once added).
-
-2. Run a preparation script (to be added) to:
-   - Filter MB vs. non-MB classes.
-   - Remove duplicates (optional replication of original procedure).
-   - Create train/validation splits for cross-validation.
-
-### 5.3 Running Experiments
-
-> Detailed commands will be added once the training scripts are in place.
-
-Planned workflow:
+## Reproducing REPORT.md Section 1b (crop-based, per-modality, 3 folds, seed 42)
 
 ```bash
-# Train baseline InceptentionNet with 5-fold cross-validation
-python src/train.py --config experiments/configs/inceptentionnet_baseline.yaml
+# main venv -- inceptentionnet, efficientnet_only
+source ~/venv/bin/activate
+for fold in 0 1 2; do
+  python3 code/scripts/run_crop_fold.py --variant inceptentionnet --seed 42 --fold $fold
+  python3 code/scripts/run_crop_fold.py --variant efficientnet_only --seed 42 --fold $fold
+done
 
-# Train FPN-InceptentionNet with 5-fold cross-validation
-python src/train.py --config experiments/configs/fpn_inceptentionnet.yaml
+# kernel venv -- fpn_mamba_full and the ablation ladder
+source ~/venv_mamba_kernel/bin/activate
+for variant in fpn_locality fpn_cross_mamba fpn_mamba_full fpn_mamba_full_topk; do
+  for fold in 0 1 2; do
+    python3 code/scripts/run_crop_kernel_fold.py --variant $variant --seed 42 --fold $fold
+  done
+done
 
-# Evaluate and generate metrics & ROC curves
-python src/eval.py --run_id <run_id>
+# significance + summary CSVs
+python3 code/scripts/crop_permodality_significance.py
 ```
 
----
+On a Slurm cluster, `run_crop_main_parallel.sbatch` / `run_crop_kernel_parallel.sbatch` run all 3
+folds of one variant in parallel across 3 GPUs (`sbatch --export=ALL,VARIANT=<name> ...`).
 
-## 6. Status
+## Reproducing REPORT.md Section 2 (efficiency)
 
-This repository is in an **early stage**:
+Single training-step timing (batch=4, forward+backward, single A100), no dataset needed --
+synthetic input tensors:
 
-- [ ] Baseline InceptentionNet implementation
-- [ ] FPN-InceptentionNet implementation
-- [ ] Training and evaluation scripts
-- [ ] Grad-CAM / attention visualization tools
-- [ ] Reproduction of baseline metrics on Kaggle data
-- [ ] Comparative experiments (baseline vs. FPN)
+```bash
+source ~/venv/bin/activate
+python3 code/scripts/benchmark_inceptentionnet_full.py     # -> inceptentionnet, 256px + 512px
 
-Updates will be pushed as the implementation and experiments progress.
-
----
-
-## 7. Citation
-
-If you use this repository or build upon its ideas, please cite the original baseline paper and the FPN paper:
-
-```text
-Fang C, Li C, Liu H, et al. Precise identification of medulloblastoma in MRI images using a convolutional neural network integrated with a self-attention mechanism. Digital Health. 2025;11:20552076251351536.
-
-Lin T-Y, Dollár P, Girshick R, He K, Hariharan B, Belongie S. Feature Pyramid Networks for Object Detection. In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR). 2017:2117–2125.
+source ~/venv_mamba_kernel/bin/activate
+python3 code/scripts/benchmark_kernel_full_model_512.py     # -> fpn_mamba_full, 256px + 512px
 ```
 
-You may also cite this repository once you decide on its final name and URL.
+## Caveats carried over from REPORT.md
 
----
-
-## 8. License
-
-> To be decided.  
-> A permissive license such as **MIT** or **Apache-2.0** is recommended if you intend others to reuse and extend this work.
-
----
-
-## 9. Acknowledgements
-
-- Fang et al. (2025) for the original InceptentionNet architecture and experimental setup.
-- The creators of the Kaggle “Brain Tumor for 14 classes” dataset.
-- Lin et al. (2017) for the Feature Pyramid Network design that motivates the proposed extension.
-
-## 10. Authors
-
-- Simbiat Adetoro - sadetoro@andrew.cmu.edu
-- Samuel Adeniji - ifeoluwasamuel40@gmail.com
+- Full-slice screening is 3 folds / 1 seed -- exploratory, not confirmatory power. Only the AUC
+  comparison (p=0.035) clears significance there.
+- Crop-based results are also 3 folds / 1 seed (seed 42) -- every metric favors `fpn_mamba_full`
+  directionally but none reaches p<0.05 yet; would need a multi-seed run to confirm.
+- The ablation ladder on the crop-based pipeline (`fpn_locality`, `fpn_cross_mamba`,
+  `fpn_mamba_full`, `fpn_mamba_full_topk`) clusters tightly at this sample size -- no ablation rung
+  is confirmed better than another; see `results/crop_permodality/crop_permodality_significance.csv`.
